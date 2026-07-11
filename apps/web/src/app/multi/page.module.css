@@ -1,0 +1,42 @@
+.main {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 1.5rem 1rem 4rem;
+}
+
+.topBar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 2rem;
+}
+
+.brand {
+  font-weight: 700;
+  font-size: 1.1rem;
+  text-decoration: none;
+  color: inherit;
+}
+
+.header {
+  margin-bottom: 1.5rem;
+}
+
+.title {
+  font-size: 1.6rem;
+  margin: 0 0 0.5rem;
+}
+
+.sub {
+  color: var(--muted, #6b7280);
+  margin: 0;
+  font-size: 0.95rem;
+  line-height: 1.5;
+}
+
+.card {
+  border: 1px solid var(--border, #e5e7eb);
+  border-radius: 12px;
+  padding: 1.25rem;
+  background: var(--surface, #fff);
+}
