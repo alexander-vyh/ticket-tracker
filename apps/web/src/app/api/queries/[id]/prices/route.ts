@@ -29,11 +29,16 @@ export async function GET(
       timePreference: true,
       cabinClass: true,
       tripType: true,
+      segments: true,
       currency: true,
       expiresAt: true,
       createdAt: true,
       active: true,
       scrapeInterval: true,
+      adults: true,
+      children: true,
+      infantsInSeat: true,
+      infantsOnLap: true,
     },
   });
 

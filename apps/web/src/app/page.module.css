@@ -84,6 +84,18 @@
   border-color: var(--accent);
 }
 
+.compareLink {
+  display: inline-block;
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+  text-align: center;
+}
+
+.compareLink:hover {
+  text-decoration: underline;
+}
+
 .providers {
   width: 100%;
   max-width: 560px;

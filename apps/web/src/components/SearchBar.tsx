@@ -13,6 +13,8 @@ import { ConfirmationCard, type ParsedQuery } from './ConfirmationCard';
 import { FlightPicker, type RouteFlights } from './FlightPicker';
 import { LinkBanner, type CreatedTracker } from './LinkBanner';
 import { ManualEntryForm, type ManualFormValues } from './ManualEntryForm';
+import { MultiLegEntryForm, type CreatedSegmentQuery } from './MultiLegEntryForm';
+import { tripTypeLabel, type SegmentsTripType } from '@/lib/segments';
 
 // "ft-" prefix kept across the Flight Finder rename so existing browsers preserve state.
 const PREVIEW_STORAGE_KEY_BASE = 'ft-preview-run';
@@ -110,11 +112,13 @@ export function SearchBar({
   const [maxTrackedPerRoute, setMaxTrackedPerRoute] = useState(10);
 
   const [createdTrackers, setCreatedTrackers] = useState<CreatedTracker[] | null>(null);
+  const [createdTripType, setCreatedTripType] = useState<SegmentsTripType | null>(null);
 
   const [activeSearchMethod, setActiveSearchMethod] = useState<'ai' | 'manual'>('ai');
   const [manualMode, setManualMode] = useState(false);
   const [manualRawInput, setManualRawInput] = useState('');
   const [manualFormValues, setManualFormValues] = useState<ManualFormValues | null>(null);
+  const [entryMode, setEntryMode] = useState<'simple' | 'multi-leg'>('simple');
 
   useEffect(() => {
     fetch('/api/admin/config')
@@ -442,6 +446,35 @@ export function SearchBar({
     }
   };
 
+  // Multi-leg (open-jaw / multi-city) itineraries skip the AI-parse ->
+  // preview -> picker pipeline entirely: MultiLegEntryForm posts directly to
+  // /api/queries (that pipeline only understands single origin/destination
+  // pairs, not ordered segments) and hands back the created trackers here.
+  const handleMultiLegCreated = (
+    queries: CreatedSegmentQuery[],
+    tripType: SegmentsTripType,
+    dateFrom: string,
+    dateTo: string,
+  ) => {
+    for (const q of queries) {
+      addSavedTracker({
+        id: q.id,
+        origin: q.origin,
+        destination: q.destination,
+        originName: q.originName,
+        destinationName: q.destinationName,
+        dateFrom,
+        dateTo,
+        createdAt: new Date().toISOString(),
+        deleteToken: q.deleteToken,
+        label: q.label ?? undefined,
+      });
+    }
+    setCreatedTrackers(queries);
+    setCreatedTripType(tripType);
+    setManualMode(false);
+  };
+
   const handleBackFromPicker = () => {
     setPreviewRoutes(null);
     setPreviewRunId(null);
@@ -465,6 +498,8 @@ export function SearchBar({
     setManualFormValues(null);
     setVpnCountries([]);
     setEditingValues(null);
+    setEntryMode('simple');
+    setCreatedTripType(null);
     clearSavedPreview(storageKey);
     inputRef.current?.focus();
   };
@@ -501,23 +536,54 @@ export function SearchBar({
   return (
     <div className={styles.root}>
       {manualMode ? (
-        <ManualEntryForm
-          onSubmit={(nextParsed, rawInput, formValues) => {
-            setParsed(nextParsed);
-            setManualRawInput(rawInput);
-            setManualFormValues(formValues);
-            setManualMode(false);
-            setEditingValues(null);
-          }}
-          onCancel={() => {
-            setActiveSearchMethod('ai');
-            setManualMode(false);
-            setEditingValues(null);
-          }}
-          adminCurrency={adminCurrency}
-          cancelLabel="Use AI search"
-          initialValues={editingValues ?? undefined}
-        />
+        <>
+          <div className={styles.entryModeToggle}>
+            <button
+              type="button"
+              className={`${styles.entryModeOption} ${entryMode === 'simple' ? styles.entryModeOptionActive : ''}`}
+              onClick={() => setEntryMode('simple')}
+            >
+              One-way / round trip
+            </button>
+            <button
+              type="button"
+              className={`${styles.entryModeOption} ${entryMode === 'multi-leg' ? styles.entryModeOptionActive : ''}`}
+              onClick={() => setEntryMode('multi-leg')}
+            >
+              Multi-leg (open-jaw)
+            </button>
+          </div>
+          {entryMode === 'simple' ? (
+            <ManualEntryForm
+              onSubmit={(nextParsed, rawInput, formValues) => {
+                setParsed(nextParsed);
+                setManualRawInput(rawInput);
+                setManualFormValues(formValues);
+                setManualMode(false);
+                setEditingValues(null);
+              }}
+              onCancel={() => {
+                setActiveSearchMethod('ai');
+                setManualMode(false);
+                setEditingValues(null);
+              }}
+              adminCurrency={adminCurrency}
+              cancelLabel="Use AI search"
+              initialValues={editingValues ?? undefined}
+            />
+          ) : (
+            <MultiLegEntryForm
+              onCreated={handleMultiLegCreated}
+              onCancel={() => {
+                setActiveSearchMethod('ai');
+                setManualMode(false);
+                setEntryMode('simple');
+              }}
+              adminCurrency={adminCurrency}
+              cancelLabel="Use AI search"
+            />
+          )}
+        </>
       ) : (
         <>
           <div className={styles.inputWrapper}>
@@ -671,10 +737,15 @@ export function SearchBar({
       )}
 
       {createdTrackers && (
-        <LinkBanner
-          trackers={createdTrackers}
-          onDismiss={handleReset}
-        />
+        <>
+          {createdTripType && (
+            <div className={styles.createdShape}>{tripTypeLabel(createdTripType)} itinerary created</div>
+          )}
+          <LinkBanner
+            trackers={createdTrackers}
+            onDismiss={handleReset}
+          />
+        </>
       )}
     </div>
   );

@@ -115,6 +115,7 @@ export default async function HomePage() {
             <UpdateBanner />
             <PriceAlerts />
             <SavedTrackers isAuthenticated={multiUserEnabled && !!user} />
+            <Link href="/compare" className={styles.compareLink}>Compare options across your trackers &rarr;</Link>
             <UsageStats />
           </>
         ) : (
