@@ -36,13 +36,47 @@ function isoDay(d: Date): string {
   return d.toISOString().slice(0, 10);
 }
 
+/** Maps a DB tripType string onto the tfs-builder's TfsTrip enum. */
+const TRIP_MAP: Record<string, TfsTrip> = {
+  one_way: 'one-way',
+  round_trip: 'round-trip',
+  open_jaw: 'open-jaw',
+  multi_city: 'multi-city',
+};
+
 /** Maps a scrape date pair + passenger counts into the TfsQuery the dataplane builder expects. */
 export function pairToTfsQuery(
-  params: Pick<FlightSearchParams, 'origin' | 'destination' | 'dateFrom' | 'dateTo' | 'tripType' | 'cabinClass'>,
+  params: Pick<FlightSearchParams, 'origin' | 'destination' | 'dateFrom' | 'dateTo' | 'tripType' | 'cabinClass' | 'segments'>,
   passengers: PassengerCounts,
 ): TfsQuery {
-  const trip: TfsTrip = params.tripType === 'one_way' ? 'one-way' : 'round-trip';
   const seat: TfsSeat = CABIN_MAP[params.cabinClass ?? 'economy'] ?? 'economy';
+
+  // Multi-segment itineraries (open-jaw / multi-city) carry their own ordered
+  // legs, each with its own from/to/date. The origin/destination/dateFrom/
+  // dateTo pair does NOT describe them, so map the stored legs straight through
+  // rather than reconstructing a mirrored round-trip (which would silently
+  // price a different itinerary — the k5m.5 bug). validateSegmentCount in the
+  // tfs-builder enforces the count/shape invariants for the chosen trip type.
+  if (params.segments && params.segments.length >= 2) {
+    const trip: TfsTrip = TRIP_MAP[params.tripType ?? 'multi_city'] ?? 'multi-city';
+    return {
+      trip,
+      seat,
+      segments: params.segments.map((s) => ({
+        date: s.date,
+        fromAirport: s.from,
+        toAirport: s.to,
+      })),
+      passengers: {
+        adults: passengers.adults,
+        children: passengers.children,
+        infantsInSeat: passengers.infantsInSeat,
+        infantsOnLap: passengers.infantsOnLap,
+      },
+    };
+  }
+
+  const trip: TfsTrip = params.tripType === 'one_way' ? 'one-way' : 'round-trip';
   const outbound = { date: isoDay(params.dateFrom), fromAirport: params.origin, toAirport: params.destination };
   const segments =
     trip === 'one-way'
@@ -205,6 +239,17 @@ export function createFetchBrowserAdapter(deps: FetchBrowserAdapterDeps): FetchB
       // through to the proven q= path below rather than propagating.
     }
     if (!nav) {
+      // The NL q= fallback builds a search from origin/destination + dates,
+      // which can only express a one-way or round-trip. For an open-jaw /
+      // multi-city itinerary that fallback would silently reprice a *different*
+      // (reversed round-trip) route, so suppress it: return no results and let
+      // the orchestrator's SSR canary decide no_options vs throttled on the
+      // real multi-city query. (ticket-tracker-k5m.5)
+      const isMultiSegment = query.trip === 'open-jaw' || query.trip === 'multi-city';
+      if (isMultiSegment) {
+        prices = [];
+        return { status: 'ok', flights: [] };
+      }
       nav = await navigateGoogleFlights(deps.pairParams, deps.countryProfile, deps.proxyUrl);
     }
 

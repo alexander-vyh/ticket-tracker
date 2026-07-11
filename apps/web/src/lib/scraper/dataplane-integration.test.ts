@@ -100,6 +100,47 @@ describe('pairToTfsQuery', () => {
     expect(pairToTfsQuery({ ...PAIR_PARAMS, cabinClass: 'business' }, { adults: 1, children: 0, infantsInSeat: 0, infantsOnLap: 0 }).seat).toBe('business');
     expect(pairToTfsQuery({ ...PAIR_PARAMS, cabinClass: 'not-a-real-cabin' }, { adults: 1, children: 0, infantsInSeat: 0, infantsOnLap: 0 }).seat).toBe('economy');
   });
+
+  it('honors stored open-jaw segments instead of mirroring the origin/destination pair', () => {
+    // LAX -> AKL out, then CHC -> LAX back: the return does NOT reverse the
+    // outbound (different NZ gateway). The old behavior reconstructed a
+    // round-trip AKL -> LAX return, silently pricing the wrong itinerary (k5m.5).
+    const q = pairToTfsQuery(
+      {
+        ...PAIR_PARAMS,
+        tripType: 'open_jaw',
+        segments: [
+          { from: 'LAX', to: 'AKL', date: '2026-12-18' },
+          { from: 'CHC', to: 'LAX', date: '2027-01-08' },
+        ],
+      },
+      { adults: 3, children: 2, infantsInSeat: 0, infantsOnLap: 0 },
+    );
+    expect(q.trip).toBe('open-jaw');
+    expect(q.segments).toEqual([
+      { date: '2026-12-18', fromAirport: 'LAX', toAirport: 'AKL' },
+      { date: '2027-01-08', fromAirport: 'CHC', toAirport: 'LAX' },
+    ]);
+    expect(q.passengers).toEqual({ adults: 3, children: 2, infantsInSeat: 0, infantsOnLap: 0 });
+  });
+
+  it('maps a 3-leg multi-city itinerary straight through', () => {
+    const q = pairToTfsQuery(
+      {
+        ...PAIR_PARAMS,
+        tripType: 'multi_city',
+        segments: [
+          { from: 'LAX', to: 'AKL', date: '2026-12-18' },
+          { from: 'AKL', to: 'ZQN', date: '2026-12-28' },
+          { from: 'CHC', to: 'LAX', date: '2027-01-08' },
+        ],
+      },
+      { adults: 2, children: 0, infantsInSeat: 0, infantsOnLap: 0 },
+    );
+    expect(q.trip).toBe('multi-city');
+    expect(q.segments).toHaveLength(3);
+    expect(q.segments[2]).toEqual({ date: '2027-01-08', fromAirport: 'CHC', toAirport: 'LAX' });
+  });
 });
 
 describe('adultsOnlyVariant', () => {

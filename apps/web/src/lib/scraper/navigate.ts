@@ -39,7 +39,12 @@ export interface FlightSearchParams {
   dateFrom: Date;
   dateTo: Date;
   cabinClass?: string;
-  tripType?: string; // 'one_way' | 'round_trip'
+  tripType?: string; // 'one_way' | 'round_trip' | 'open_jaw' | 'multi_city'
+  // Ordered legs for open-jaw / multi-city itineraries (ticket-tracker-k5m.5).
+  // When present, THESE legs (each with its own from/to/date) describe the
+  // itinerary — origin/destination/dateFrom/dateTo do not. Absent (undefined)
+  // means a single-pair itinerary described by origin/destination + dates.
+  segments?: Array<{ from: string; to: string; date: string }>;
   currency?: string | null; // ISO 4217 code. null = omit (Google auto-detects)
   country?: string | null; // ISO 3166-1 alpha-2. null = omit (Google auto-detects)
   // Optional passenger breakdown (design.md R1). Undefined fields default to

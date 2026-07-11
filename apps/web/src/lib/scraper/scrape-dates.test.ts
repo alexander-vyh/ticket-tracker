@@ -2,6 +2,8 @@ import { describe, it, expect } from 'vitest';
 import {
   expandQueryDates,
   expandContinuousRangeToDates,
+  expandScrapePairs,
+  normalizeStoredSegments,
 } from './scrape-dates';
 
 const D = (s: string) => new Date(s + 'T00:00:00Z');
@@ -135,6 +137,83 @@ describe('expandContinuousRangeToDates', () => {
 
   it('returns single date for inverted range (defensive)', () => {
     expect(expandContinuousRangeToDates('2026-06-19', '2026-06-15')).toEqual(['2026-06-19']);
+  });
+});
+
+describe('normalizeStoredSegments', () => {
+  it('coerces a valid open-jaw leg array', () => {
+    const raw = [
+      { from: 'LAX', to: 'AKL', date: '2026-12-18' },
+      { from: 'CHC', to: 'LAX', date: '2027-01-08' },
+    ];
+    expect(normalizeStoredSegments(raw)).toEqual(raw);
+  });
+
+  it('returns undefined for null / non-array / fewer than 2 legs', () => {
+    expect(normalizeStoredSegments(null)).toBeUndefined();
+    expect(normalizeStoredSegments(undefined)).toBeUndefined();
+    expect(normalizeStoredSegments('not-an-array')).toBeUndefined();
+    expect(normalizeStoredSegments([{ from: 'LAX', to: 'AKL', date: '2026-12-18' }])).toBeUndefined();
+  });
+
+  it('returns undefined when any leg is malformed (missing/typed field)', () => {
+    expect(
+      normalizeStoredSegments([
+        { from: 'LAX', to: 'AKL', date: '2026-12-18' },
+        { from: 'CHC', to: 'LAX' }, // missing date
+      ]),
+    ).toBeUndefined();
+    expect(
+      normalizeStoredSegments([
+        { from: 'LAX', to: 'AKL', date: '2026-12-18' },
+        { from: 123, to: 'LAX', date: '2027-01-08' }, // non-string from
+      ]),
+    ).toBeUndefined();
+  });
+});
+
+describe('expandScrapePairs', () => {
+  it('collapses a multi-segment itinerary to a single first-leg/last-leg pair', () => {
+    const pairs = expandScrapePairs({
+      dateFrom: D('2026-12-18'),
+      dateTo: D('2027-01-08'),
+      flexibility: 3,
+      tripType: 'open_jaw',
+      segments: [
+        { from: 'LAX', to: 'AKL', date: '2026-12-18' },
+        { from: 'CHC', to: 'LAX', date: '2027-01-08' },
+      ],
+    });
+    // Fixed per-leg dates: no flexibility grid, exactly one pair (k5m.5).
+    expect(pairs).toHaveLength(1);
+    expect(iso(pairs[0]!.outbound)).toBe('2026-12-18');
+    expect(iso(pairs[0]!.return_)).toBe('2027-01-08');
+  });
+
+  it('uses first and last leg dates for a 3-leg multi-city itinerary', () => {
+    const pairs = expandScrapePairs({
+      dateFrom: D('2026-12-18'),
+      dateTo: D('2027-01-08'),
+      flexibility: 0,
+      tripType: 'multi_city',
+      segments: [
+        { from: 'LAX', to: 'AKL', date: '2026-12-18' },
+        { from: 'AKL', to: 'ZQN', date: '2026-12-28' },
+        { from: 'CHC', to: 'LAX', date: '2027-01-08' },
+      ],
+    });
+    expect(pairs).toHaveLength(1);
+    expect(iso(pairs[0]!.outbound)).toBe('2026-12-18');
+    expect(iso(pairs[0]!.return_)).toBe('2027-01-08');
+  });
+
+  it('delegates to expandQueryDates for simple itineraries (no segments)', () => {
+    const pairs = expandScrapePairs(
+      { dateFrom: D('2026-06-15'), dateTo: D('2026-06-21'), flexibility: 3, tripType: 'one_way' },
+      { oneWayCap: 7 },
+    );
+    // One-way over a 7-day window expands to a grid, not a single pair.
+    expect(pairs.length).toBeGreaterThan(1);
   });
 });
 

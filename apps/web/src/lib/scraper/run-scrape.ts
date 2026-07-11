@@ -12,7 +12,7 @@ import { getModelCosts } from './ai-registry';
 import { isKnownAirline } from './airline-urls';
 import { getCountryProfile } from './country-profiles';
 import { createVpnProvider, type VpnProviderType } from './vpn';
-import { expandQueryDates } from './scrape-dates';
+import { expandScrapePairs, normalizeStoredSegments } from './scrape-dates';
 import { runTwoTierGoogleFlights, type PassengerCounts } from './dataplane-integration';
 import type { Availability, Tier } from '../dataplane/orchestrator';
 
@@ -392,17 +392,22 @@ async function scrapeQueryForCountry(
   // in [dateFrom, dateTo] capped at 7. Round-trip emits a single (dateFrom,
   // dateTo) pair regardless of flexibility; iterating multiple pairs would
   // collapse same-outbound flights with different returns at the
-  // flightId/dedupe layer.
-  const pairs = expandQueryDates(
+  // flightId/dedupe layer. Multi-segment (open-jaw/multi-city) itineraries
+  // carry fixed per-leg dates and collapse to a single pair (ticket-tracker-k5m.5).
+  const pairs = expandScrapePairs(
     {
       dateFrom: searchParams.dateFrom,
       dateTo: searchParams.dateTo,
       flexibility: query.flexibility ?? 0,
       tripType: searchParams.tripType ?? 'round_trip',
+      segments: searchParams.segments,
     },
     { oneWayCap: 7 },
   );
-  console.log(`[scrape] query=${queryId} expanded into ${pairs.length} date pair(s)`);
+  const segmentCount = searchParams.segments?.length ?? 0;
+  console.log(
+    `[scrape] query=${queryId}${segmentCount >= 2 ? ` multi-segment (${segmentCount} legs)` : ''} expanded into ${pairs.length} date pair(s)`,
+  );
 
   type PriceDataWithTier = import('./extract-prices').PriceData & { sourceTier?: 'ssr' | 'browser_llm' };
   let allPrices: PriceDataWithTier[] = [];
@@ -694,7 +699,18 @@ export async function runScrapeForQuery(
         currency: effectiveCurrency,
         country: effectiveCountry,
       }
-    : { ...query, cabinClass: query.cabinClass, tripType: query.tripType, currency: effectiveCurrency, country: effectiveCountry };
+    : {
+        ...query,
+        cabinClass: query.cabinClass,
+        tripType: query.tripType,
+        // Coerce the stored JSON legs (open-jaw / multi-city) into the typed
+        // FlightSearchParams.segments the scrape pipeline threads down to
+        // pairToTfsQuery. null / malformed => undefined (simple itinerary).
+        // (ticket-tracker-k5m.5)
+        segments: normalizeStoredSegments(query.segments),
+        currency: effectiveCurrency,
+        country: effectiveCountry,
+      };
 
   // Reuse a pre-created row when the caller (e.g. the manual /scrape endpoint)
   // already wrote an `in_progress` row so the UI dot lights up before the

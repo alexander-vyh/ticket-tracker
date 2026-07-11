@@ -127,3 +127,66 @@ export function expandContinuousRangeToDates(
   const indices = evenIndices(totalDays, Math.min(totalDays, cap));
   return indices.map((i) => toIsoDay(addDaysUtc(from, i)));
 }
+
+/** One leg of an open-jaw / multi-city itinerary as stored in Query.segments. */
+export interface StoredSegment {
+  from: string;
+  to: string;
+  date: string; // YYYY-MM-DD
+}
+
+/**
+ * Coerce the Query.segments JSON column (stored as `[{from,to,date}]` by the
+ * queries API for open-jaw / multi-city itineraries) into typed legs. Returns
+ * undefined for null, a non-array, fewer than 2 legs, or any leg missing a
+ * string from/to/date — all of which mean "treat as a simple origin/destination
+ * itinerary". (ticket-tracker-k5m.5)
+ */
+export function normalizeStoredSegments(raw: unknown): StoredSegment[] | undefined {
+  if (!Array.isArray(raw) || raw.length < 2) return undefined;
+  const legs: StoredSegment[] = [];
+  for (const leg of raw) {
+    if (
+      !leg ||
+      typeof leg !== 'object' ||
+      typeof (leg as { from?: unknown }).from !== 'string' ||
+      typeof (leg as { to?: unknown }).to !== 'string' ||
+      typeof (leg as { date?: unknown }).date !== 'string'
+    ) {
+      return undefined;
+    }
+    const { from, to, date } = leg as StoredSegment;
+    legs.push({ from, to, date });
+  }
+  return legs;
+}
+
+/**
+ * Produce the scrape date pairs for a query. Multi-segment (open-jaw /
+ * multi-city) itineraries carry fixed per-leg dates, so they collapse to a
+ * single pair — first leg's date as outbound, last leg's date as return — and
+ * skip the flexibility grid (the nearby-date sweep is ticket-tracker-izy's
+ * variation search). All other itineraries defer to expandQueryDates.
+ * (ticket-tracker-k5m.5)
+ */
+export function expandScrapePairs(
+  query: {
+    dateFrom: Date;
+    dateTo: Date;
+    flexibility: number;
+    tripType: string;
+    segments?: StoredSegment[];
+  },
+  options: ExpandQueryDatesOptions = {},
+): ScrapeDatePair[] {
+  const segs = query.segments;
+  if (Array.isArray(segs) && segs.length >= 2) {
+    return [
+      {
+        outbound: new Date(segs[0]!.date + 'T00:00:00Z'),
+        return_: new Date(segs[segs.length - 1]!.date + 'T00:00:00Z'),
+      },
+    ];
+  }
+  return expandQueryDates(query, options);
+}
