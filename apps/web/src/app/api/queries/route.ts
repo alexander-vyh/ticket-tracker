@@ -10,6 +10,8 @@ import { redis } from '@/lib/redis';
 import { safeHttpUrl } from '@/lib/safe-url';
 import { isValidPriceAmount } from '@/lib/limits';
 
+class PaxValidationError extends Error {}
+
 const MAX_ROUTES = 20;
 const MAX_FLIGHTS_PER_ROUTE = 50;
 
@@ -118,6 +120,10 @@ export async function POST(request: NextRequest) {
     tripType,
     currency: bodyCurrency,
     vpnCountries: bodyVpnCountries,
+    adults: bodyAdults,
+    children: bodyChildren,
+    infantsInSeat: bodyInfantsInSeat,
+    infantsOnLap: bodyInfantsOnLap,
   } = body;
 
   // Validate rawInput length
@@ -126,6 +132,35 @@ export async function POST(request: NextRequest) {
   }
 
   const currency: string | null = typeof bodyCurrency === 'string' && bodyCurrency ? bodyCurrency : null;
+  // Passenger counts: same invariants tfs-builder enforces (Google's 9-pax
+  // hard limit; airlines require one adult per lap infant). Absent fields
+  // default to the pre-passengers behavior: one adult.
+  const paxField = (v: unknown, name: string, min: number): number => {
+    if (v === undefined || v === null) return min;
+    if (typeof v !== 'number' || !Number.isInteger(v) || v < min || v > 9) {
+      throw new PaxValidationError(`${name} must be an integer between ${min} and 9`);
+    }
+    return v;
+  };
+  let adults: number, children: number, infantsInSeat: number, infantsOnLap: number;
+  try {
+    adults = paxField(bodyAdults, 'adults', bodyAdults === undefined ? 1 : 1);
+    children = paxField(bodyChildren, 'children', 0);
+    infantsInSeat = paxField(bodyInfantsInSeat, 'infantsInSeat', 0);
+    infantsOnLap = paxField(bodyInfantsOnLap, 'infantsOnLap', 0);
+  } catch (err) {
+    if (err instanceof PaxValidationError) return apiError(err.message, 400);
+    throw err;
+  }
+  const totalPax = adults + children + infantsInSeat + infantsOnLap;
+  if (totalPax > 9) {
+    return apiError('Too many passengers: Google Flights supports at most 9', 400);
+  }
+  if (infantsOnLap > adults) {
+    return apiError('Each infant on lap requires an adult', 400);
+  }
+
+
   if (currency !== null && currency.length > MAX_CURRENCY_LENGTH) {
     return apiError(`currency must be ${MAX_CURRENCY_LENGTH} characters or fewer`, 400);
   }
@@ -351,6 +386,10 @@ export async function POST(request: NextRequest) {
         timePreference: timePreference || 'any',
         cabinClass: cabinClass || 'economy',
         tripType: tripType === 'one_way' ? 'one_way' : 'round_trip',
+        adults,
+        children,
+        infantsInSeat,
+        infantsOnLap,
         currency,
         vpnCountries,
         expiresAt: routeExpiry,

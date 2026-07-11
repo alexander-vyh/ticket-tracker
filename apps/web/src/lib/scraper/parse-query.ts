@@ -26,6 +26,10 @@ export interface ParsedFlightQuery {
   cabinClass: 'economy' | 'premium_economy' | 'business' | 'first';
   tripType: 'one_way' | 'round_trip';
   currency: string | null; // ISO 4217 currency code (e.g., USD, EUR, GBP). null = auto-detect
+  adults: number; // travelers aged 12+ (>= 1)
+  children: number; // aged 2-11 per Google Flights brackets
+  infantsInSeat: number; // under 2, own seat
+  infantsOnLap: number; // under 2, on a lap; airlines require one adult each
 }
 
 export interface ParseAmbiguity {
@@ -39,6 +43,27 @@ export interface ParseResponse {
   confidence: 'high' | 'medium' | 'low';
   ambiguities: ParseAmbiguity[];
   dateSpanDays: number;
+}
+
+/**
+ * Clamp LLM-returned passenger counts to sane values. Parsing never throws on
+ * bad counts (the create API validates hard); it just refuses to produce
+ * negative/fractional/absurd numbers. Missing fields default to 1 adult —
+ * the pre-passengers behavior of every existing tracker.
+ */
+function normalizePassengers(parsed: ParsedFlightQuery): ParsedFlightQuery {
+  const clamp = (v: unknown, min: number): number => {
+    const n = typeof v === 'number' && Number.isFinite(v) ? Math.floor(v) : min;
+    return Math.min(9, Math.max(min, n));
+  };
+  const adults = clamp(parsed.adults, 1);
+  return {
+    ...parsed,
+    adults,
+    children: clamp(parsed.children, 0),
+    infantsInSeat: clamp(parsed.infantsInSeat, 0),
+    infantsOnLap: Math.min(clamp(parsed.infantsOnLap, 0), adults),
+  };
 }
 
 function buildSystemPrompt(): string {
@@ -66,7 +91,11 @@ Return ONLY valid JSON with this exact shape:
     "timePreference": "any" | "morning" | "afternoon" | "evening" | "redeye",
     "cabinClass": "economy" | "premium_economy" | "business" | "first",
     "tripType": "one_way" | "round_trip",
-    "currency": null
+    "currency": null,
+    "adults": number of travelers aged 12+ (default 1),
+    "children": number of travelers aged 2-11 (default 0),
+    "infantsInSeat": number of travelers under 2 with their own seat (default 0),
+    "infantsOnLap": number of travelers under 2 travelling on a lap (default 0)
   }
 }
 
@@ -131,6 +160,7 @@ Parsing rules:
 - If the user says "next month" or "sometime in July", confidence is "low" — ask to narrow
 - If the user says "flexible" without specifying days, use flexibility of 3
 - Default cabinClass to "economy" unless stated otherwise
+- Passengers: when ages are given, classify by age — 12+ are adults, 2-11 are children, under 2 are infants (assume infantsOnLap unless a seat is mentioned). "family of 5 (76, 38, 38, 5, 3)" => adults=3, children=2. A bare total like "5 people" => adults=5. Nothing stated => adults=1
 - Default timePreference to "any" unless stated
 - tripType: "one_way" if no return date is mentioned or user says "one way"; "round_trip" if a return date is given or user says "round trip" or "return". Default to "one_way" when ambiguous (no return info)
 - Extract airline preferences if mentioned
@@ -315,13 +345,13 @@ export async function parseFlightQuery(
   if ('confidence' in raw && 'parsed' in raw) {
     // New envelope format
     const rawParsed = raw.parsed as Record<string, unknown> | null;
-    parsed = rawParsed ? normalizeAirports(rawParsed) : null;
+    parsed = rawParsed ? normalizePassengers(normalizeAirports(rawParsed)) : null;
     confidence = (raw.confidence as string) === 'high' ? 'high'
       : (raw.confidence as string) === 'medium' ? 'medium' : 'low';
     ambiguities = Array.isArray(raw.ambiguities) ? raw.ambiguities as ParseAmbiguity[] : [];
   } else {
     // Legacy flat format — treat as high confidence
-    parsed = normalizeAirports(raw);
+    parsed = normalizePassengers(normalizeAirports(raw));
     confidence = 'high';
     ambiguities = [];
   }

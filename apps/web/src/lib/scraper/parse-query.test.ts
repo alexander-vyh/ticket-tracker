@@ -839,3 +839,70 @@ describe('parseFlightQuery', () => {
     expect(mockExtract.mock.calls[0]![0]).toBe('stored-parse-key');
   });
 });
+
+describe('parseFlightQuery passenger extraction', () => {
+  // oracle: age brackets are Google Flights' own (adults 12+, children 2-11,
+  // infants under 2), verified against its passenger widget 2026-07-10; the
+  // canonical family example is the user's real trip (ages 76/38/38/5/3).
+  beforeEach(() => {
+    mockExtract.mockReset();
+  });
+
+  const baseParsed = {
+    origins: [{ code: 'LAX', name: 'Los Angeles' }],
+    destinations: [{ code: 'AKL', name: 'Auckland' }],
+    dateFrom: '2026-12-18',
+    dateTo: '2027-01-08',
+    flexibility: 0,
+    maxPrice: null,
+    maxStops: null,
+    preferredAirlines: [],
+    timePreference: 'any',
+    cabinClass: 'economy',
+    tripType: 'round_trip',
+    currency: null,
+  };
+
+  it('maps split passenger counts from the LLM response', async () => {
+    mockExtract.mockResolvedValue({
+      content: makeLlmResponse({
+        confidence: 'high',
+        ambiguities: [],
+        parsed: { ...baseParsed, adults: 3, children: 2, infantsInSeat: 0, infantsOnLap: 0 },
+      }),
+      usage: { inputTokens: 100, outputTokens: 50 },
+    });
+    const { response } = await parseFlightQuery(
+      'LAX to Auckland Dec 18 - Jan 8 for 5 people aged 76, 38, 38, 5 and 3',
+    );
+    expect(response.parsed?.adults).toBe(3);
+    expect(response.parsed?.children).toBe(2);
+    expect(response.parsed?.infantsInSeat).toBe(0);
+    expect(response.parsed?.infantsOnLap).toBe(0);
+  });
+
+  it('defaults to one adult when the LLM omits passenger fields', async () => {
+    mockExtract.mockResolvedValue({
+      content: makeLlmResponse({ confidence: 'high', ambiguities: [], parsed: baseParsed }),
+      usage: { inputTokens: 100, outputTokens: 50 },
+    });
+    const { response } = await parseFlightQuery('LAX to Auckland Dec 18 - Jan 8');
+    expect(response.parsed?.adults).toBe(1);
+    expect(response.parsed?.children).toBe(0);
+  });
+
+  it('clamps absurd counts and lap infants beyond adults', async () => {
+    mockExtract.mockResolvedValue({
+      content: makeLlmResponse({
+        confidence: 'high',
+        ambiguities: [],
+        parsed: { ...baseParsed, adults: 250, children: -3, infantsOnLap: 4 },
+      }),
+      usage: { inputTokens: 100, outputTokens: 50 },
+    });
+    const { response } = await parseFlightQuery('badly parsed pax');
+    expect(response.parsed?.adults).toBe(9);
+    expect(response.parsed?.children).toBe(0);
+    expect(response.parsed?.infantsOnLap).toBeLessThanOrEqual(9);
+  });
+});

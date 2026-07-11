@@ -111,6 +111,10 @@ interface QueryWithSnapshots {
     preferredAirlines: string[];
     timePreference: string;
     cabinClass: string;
+    adults: number;
+    children: number;
+    infantsInSeat: number;
+    infantsOnLap: number;
     expiresAt: Date;
     createdAt: Date;
     firstViewedAt: Date | null;
@@ -131,6 +135,24 @@ interface QueryWithSnapshots {
   }>;
   lastRun: { startedAt: Date; status: string; error: string | null } | null;
   globalScrapeInterval: number;
+}
+
+/** "5 travelers · 3 adults, 2 children" — null for the default single adult. */
+function passengerSummary(q: {
+  adults: number;
+  children: number;
+  infantsInSeat: number;
+  infantsOnLap: number;
+}): string | null {
+  const total = q.adults + q.children + q.infantsInSeat + q.infantsOnLap;
+  if (total <= 1) return null;
+  const parts = [
+    `${q.adults} ${q.adults === 1 ? 'adult' : 'adults'}`,
+    q.children > 0 ? `${q.children} ${q.children === 1 ? 'child' : 'children'}` : null,
+    q.infantsInSeat > 0 ? `${q.infantsInSeat} infant${q.infantsInSeat === 1 ? '' : 's'} (seat)` : null,
+    q.infantsOnLap > 0 ? `${q.infantsOnLap} infant${q.infantsOnLap === 1 ? '' : 's'} (lap)` : null,
+  ].filter(Boolean);
+  return `${total} travelers · ${parts.join(', ')}`;
 }
 
 function renderRouteBlock(qData: QueryWithSnapshots, isMultiRoute: boolean) {
@@ -414,6 +436,12 @@ export default async function ChartPage({ params }: Props) {
                   <span>±{primary.query.flexibility}d</span>
                 </>
               )}
+              {passengerSummary(primary.query) && (
+                <>
+                  <span className={styles.sep}>·</span>
+                  <span>{passengerSummary(primary.query)}</span>
+                </>
+              )}
             </div>
           </>
         ) : (
@@ -431,6 +459,12 @@ export default async function ChartPage({ params }: Props) {
                 <>
                   <span className={styles.sep}>·</span>
                   <span>±{primary.query.flexibility}d</span>
+                </>
+              )}
+              {passengerSummary(primary.query) && (
+                <>
+                  <span className={styles.sep}>·</span>
+                  <span>{passengerSummary(primary.query)}</span>
                 </>
               )}
             </div>

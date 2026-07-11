@@ -642,3 +642,61 @@ describe('POST /api/queries', () => {
     expect(res.status).toBe(201);
   });
 });
+
+describe('POST /api/queries passenger fields', () => {
+  // oracle: validation limits mirror Google Flights' own booking rules, verified
+  // against its UI 2026-07-10 (9-passenger hard cap; the passenger widget refuses
+  // lap infants beyond the adult count) — the walking-skeleton probes rendered
+  // these constraints server-side, independent of this implementation.
+  beforeEach(() => {
+    mockQueryCreate.mockClear();
+    mockRedisIncr.mockResolvedValue(1);
+  });
+
+  it('persists split passenger counts (children are not folded into adults)', async () => {
+    const res = await POST(
+      makeRequest({ ...validBody, adults: 3, children: 2 }),
+    );
+    expect(res.status).toBe(201);
+    expect(mockQueryCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          adults: 3,
+          children: 2,
+          infantsInSeat: 0,
+          infantsOnLap: 0,
+        }),
+      }),
+    );
+  });
+
+  it('defaults to one adult when passenger fields are absent (upstream behavior)', async () => {
+    const res = await POST(makeRequest(validBody));
+    expect(res.status).toBe(201);
+    expect(mockQueryCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ adults: 1, children: 0 }),
+      }),
+    );
+  });
+
+  it('rejects more than 9 total passengers', async () => {
+    const res = await POST(makeRequest({ ...validBody, adults: 8, children: 2 }));
+    expect(res.status).toBe(400);
+    expect(mockQueryCreate).not.toHaveBeenCalled();
+  });
+
+  it('rejects lap infants exceeding adults', async () => {
+    const res = await POST(
+      makeRequest({ ...validBody, adults: 1, infantsOnLap: 2 }),
+    );
+    expect(res.status).toBe(400);
+    expect(mockQueryCreate).not.toHaveBeenCalled();
+  });
+
+  it('rejects non-integer passenger counts', async () => {
+    const res = await POST(makeRequest({ ...validBody, adults: 2.5 }));
+    expect(res.status).toBe(400);
+    expect(mockQueryCreate).not.toHaveBeenCalled();
+  });
+});
