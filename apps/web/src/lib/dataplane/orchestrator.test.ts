@@ -44,6 +44,17 @@ describe('orchestrateScrape tier routing', () => {
     expect(d.fetchBrowser).not.toHaveBeenCalled();
   });
 
+  it('deepSearch forces the browser tier for an adults-only query (skips SSR top-5)', async () => {
+    // Without deepSearch this same query is served entirely from SSR (see the
+    // test above). deepSearch surfaces one-stop carriers the SSR top-5 hides.
+    const d = deps();
+    const r = await orchestrateScrape(RT_ADULTS, d, { browserBudget: 5, deepSearch: true });
+    expect(d.fetchSsr).not.toHaveBeenCalled();
+    expect(d.fetchBrowser).toHaveBeenCalled();
+    expect(r.tier).toBe('browser_llm');
+    expect(r.availability).toBe('available');
+  });
+
   it('children query skips SSR entirely and uses the browser tier', async () => {
     const d = deps();
     const r = await orchestrateScrape(RT_FAMILY, d, { browserBudget: 5 });

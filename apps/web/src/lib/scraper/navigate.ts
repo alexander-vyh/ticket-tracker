@@ -33,6 +33,56 @@ async function simulateHumanBehavior(page: Page): Promise<void> {
   await randomDelay(100, 400);
 }
 
+/**
+ * Expand Google Flights' collapsed result list before the DOM is read.
+ *
+ * Google renders only its top ~5-8 ranked "Best" flights plus a "View more
+ * flights" button; the cheaper one-stop carriers a flexible trip needs (Fiji
+ * Airways via NAN, Qantas via SYD, Hawaiian via HNL) sit behind that button and
+ * load client-side only. Without expanding it the extractor never sees them —
+ * the ticket-tracker-k5m.8 root cause. This runs only on the browser tier,
+ * which is already the "pay for depth" path (SSR top-5 stays the cheap
+ * high-frequency movement signal).
+ *
+ * Best-effort and fail-open: matches the expander by several localized-label /
+ * role candidates (Google's markup drifts over time and by locale), clicks up
+ * to `maxClicks` times waiting for new rows each time, and on any error or a
+ * missing button simply leaves the current results in place. Expansion is extra
+ * depth, never a hard requirement — a throw here must not fail the navigation.
+ */
+async function expandRenderedFlights(page: Page, maxClicks = 3): Promise<number> {
+  let clicks = 0;
+  for (let i = 0; i < maxClicks; i++) {
+    const candidates = [
+      page.getByRole('button', { name: /view more flights/i }),
+      page.locator('button:has-text("View more flights")'),
+      page.locator('button:has-text("more flights")'),
+    ];
+    let clicked = false;
+    for (const btn of candidates) {
+      try {
+        const first = btn.first();
+        if (await first.isVisible({ timeout: 1500 })) {
+          await first.scrollIntoViewIfNeeded().catch(() => {});
+          await first.click({ timeout: 3000 });
+          clicks++;
+          clicked = true;
+          // Let the newly-revealed rows render before the next probe / the read.
+          await randomDelay(1200, 2200);
+          break;
+        }
+      } catch {
+        // Try the next candidate selector.
+      }
+    }
+    if (!clicked) break; // No expander left → list is fully expanded.
+  }
+  if (clicks > 0) {
+    console.log(`[navigate] expanded flight list via ${clicks} 'View more' click(s)`);
+  }
+  return clicks;
+}
+
 export interface FlightSearchParams {
   origin: string;
   destination: string;
@@ -401,6 +451,9 @@ export async function navigateGoogleFlights(
       // the page spends accumulating resources before we extract data
       if (resultsFound) {
         await simulateHumanBehavior(page);
+        // Reveal the full carrier list (one-stops behind "View more flights")
+        // before reading the DOM. (ticket-tracker-k5m.8)
+        await expandRenderedFlights(page);
       }
 
       // Capture visible text instead of raw HTML — Google Flights pages are 2-3MB
@@ -515,6 +568,9 @@ export async function navigateGoogleFlightsUrl(
 
     if (resultsFound) {
       await simulateHumanBehavior(page);
+      // Reveal the full carrier list (one-stops behind "View more flights")
+      // before reading the DOM. (ticket-tracker-k5m.8)
+      await expandRenderedFlights(page);
     }
 
     const html = await page.evaluate(() => document.body.innerText);

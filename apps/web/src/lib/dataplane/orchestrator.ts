@@ -40,6 +40,14 @@ export interface OrchestratorDeps {
 export interface OrchestratorOptions {
   /** Max browser-tier requests this scrape may consume (fetch + canary). */
   browserBudget: number;
+  /**
+   * Force the browser tier even for an adults-only query that the SSR tier
+   * could price. SSR returns only Google's top-~5 ranked "best" flights, which
+   * structurally excludes cheaper one-stop carriers (Fiji via NAN, Qantas via
+   * SYD); the browser tier renders the full list. Default false keeps SSR as
+   * the cheap high-frequency movement signal. (ticket-tracker-k5m.8)
+   */
+  deepSearch?: boolean;
 }
 
 export type Availability = 'available' | 'no_options' | 'throttled';
@@ -66,8 +74,11 @@ export async function orchestrateScrape(
   let browserUsed = 0;
   let usedSsr = false;
 
-  // Tier 1 — only worth attempting when SSR can actually serve the query.
-  if (!hasChildrenOrInfants(query)) {
+  // Tier 1 — only worth attempting when SSR can actually serve the query AND
+  // the caller has not requested a deep (full-carrier) search. SSR's top-5
+  // 'best' set hides one-stop alternatives, so deepSearch skips straight to the
+  // browser tier. (ticket-tracker-k5m.8)
+  if (!hasChildrenOrInfants(query) && !opts.deepSearch) {
     usedSsr = true;
     const ssr = await deps.fetchSsr(query);
     if (ssr.status === 'ok' && ssr.flights.length > 0) {

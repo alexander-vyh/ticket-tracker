@@ -343,6 +343,9 @@ export interface TwoTierDeps {
   proxyUrl: string | undefined;
   travelDateFallback: string;
   browserBudget: number;
+  /** Force the browser tier for adults-only queries to surface one-stop
+   *  carriers Google's SSR top-5 hides. (ticket-tracker-k5m.8) */
+  deepSearch?: boolean;
 }
 
 /**
@@ -377,7 +380,7 @@ export async function runTwoTierGoogleFlights(deps: TwoTierDeps): Promise<TwoTie
       fetchBrowser: browserAdapter.fetchBrowser,
       canaryHasInventory: canaryWrapped,
     },
-    { browserBudget: deps.browserBudget },
+    { browserBudget: deps.browserBudget, deepSearch: deps.deepSearch },
   );
 
   const failureReason = browserAdapter.getFailureReason();
