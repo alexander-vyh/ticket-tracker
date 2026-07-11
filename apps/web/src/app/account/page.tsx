@@ -17,6 +17,7 @@ export const dynamic = 'force-dynamic';
 interface AccountQuery extends GroupableQuery {
   scrapeStatus: string | null;
   scrapeError: string | null;
+  scrapeAvailability: string | null;
 }
 
 export default async function AccountPage() {
@@ -45,7 +46,7 @@ export default async function AccountPage() {
       fetchRuns: {
         orderBy: { startedAt: 'desc' },
         take: 1,
-        select: { startedAt: true, status: true, error: true },
+        select: { startedAt: true, status: true, error: true, availability: true },
       },
     },
   });
@@ -66,6 +67,7 @@ export default async function AccountPage() {
     lastScrapedAt: q.fetchRuns[0]?.startedAt.toISOString() ?? null,
     scrapeStatus: q.fetchRuns[0]?.status ?? null,
     scrapeError: q.fetchRuns[0]?.error ?? null,
+    scrapeAvailability: q.fetchRuns[0]?.availability ?? null,
     createdAt: q.createdAt.toISOString(),
   }));
 
@@ -113,6 +115,7 @@ export default async function AccountPage() {
                   status: q.scrapeStatus,
                   error: q.scrapeError,
                   startedAt: q.lastScrapedAt ?? null,
+                  availability: q.scrapeAvailability,
                 })),
               );
               return (

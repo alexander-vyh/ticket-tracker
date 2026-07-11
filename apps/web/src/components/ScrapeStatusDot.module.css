@@ -29,6 +29,14 @@
   animation: scrapePulse 1.4s ease-in-out infinite;
 }
 
+/* no_options: the scrape worked but the route is genuinely sold out. A hollow
+   slate ring reads as "informational, not an error" — distinct from both the
+   solid green success and the solid red failure. (ticket-tracker-98s) */
+.no_options {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px var(--text-muted, #94a3b8);
+}
+
 @keyframes scrapePulse {
   0%, 100% { opacity: 1; transform: scale(1); }
   50% { opacity: 0.4; transform: scale(0.75); }

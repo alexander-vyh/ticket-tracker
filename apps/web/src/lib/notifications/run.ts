@@ -1,6 +1,6 @@
 import { prisma } from '@/lib/prisma';
-import { detectNewLow } from './detect';
-import { formatNewLowMessage } from './format';
+import { detectNewLow, detectAvailabilityFlip } from './detect';
+import { formatNewLowMessage, formatAvailabilityFlipMessage } from './format';
 import { dispatchNotifications } from './notify';
 
 /**
@@ -61,33 +61,59 @@ export async function notifyNewLows(queryIds: string[], cycleStartedAt: Date): P
         floorAbs,
         floorPct,
       });
-      if (!alert) continue;
 
-      const message = formatNewLowMessage({
-        alert,
-        route: { origin: query.origin, destination: query.destination },
-        baseUrl,
-      });
-      const outcomes = await dispatchNotifications(query.userId, message);
-
-      // Only advance the dedupe marker once at least one channel actually
-      // delivered. A transient failure on every channel must not consume the
-      // low and suppress the retry next cycle; and with no channels at all we
-      // leave it untouched so alerts start the moment one is configured.
-      if (outcomes.some((o) => o.ok)) {
-        await prisma.query.update({
-          where: { id: query.id },
-          data: { lastNotifiedLowPrice: alert.currentMin, lastNotifiedAt: new Date() },
+      if (alert) {
+        const message = formatNewLowMessage({
+          alert,
+          route: { origin: query.origin, destination: query.destination },
+          baseUrl,
         });
+        const outcomes = await dispatchNotifications(query.userId, message);
+
+        // Only advance the dedupe marker once at least one channel actually
+        // delivered. A transient failure on every channel must not consume the
+        // low and suppress the retry next cycle; and with no channels at all we
+        // leave it untouched so alerts start the moment one is configured.
+        if (outcomes.some((o) => o.ok)) {
+          await prisma.query.update({
+            where: { id: query.id },
+            data: { lastNotifiedLowPrice: alert.currentMin, lastNotifiedAt: new Date() },
+          });
+        }
+
+        const sent = outcomes.filter((o) => o.ok).length;
+        console.log(
+          `[notify] query=${query.id} new low ${alert.currentMin} (was ${alert.baseline}) ` +
+            `channels=${outcomes.length} sent=${sent} failed=${outcomes.length - sent}`,
+        );
+        for (const o of outcomes.filter((o) => !o.ok)) {
+          console.error(`[notify] query=${query.id} channel=${o.channelId} type=${o.type} failed: ${o.error}`);
+        }
       }
 
-      const sent = outcomes.filter((o) => o.ok).length;
-      console.log(
-        `[notify] query=${query.id} new low ${alert.currentMin} (was ${alert.baseline}) ` +
-          `channels=${outcomes.length} sent=${sent} failed=${outcomes.length - sent}`,
-      );
-      for (const o of outcomes.filter((o) => !o.ok)) {
-        console.error(`[notify] query=${query.id} channel=${o.channelId} type=${o.type} failed: ${o.error}`);
+      // Availability flip (no_options -> available) is checked independently of
+      // the price path: a route can become bookable at an ordinary price, which
+      // would produce no new-low alert. Transition-based detection dedupes it,
+      // so no persistent marker is needed. (ticket-tracker-98s)
+      const flip = await detectAvailabilityFlip({
+        query: { id: query.id, currency: query.currency },
+        cycleStartedAt,
+      });
+      if (flip) {
+        const flipMessage = formatAvailabilityFlipMessage({
+          alert: flip,
+          route: { origin: query.origin, destination: query.destination },
+          baseUrl,
+        });
+        const flipOutcomes = await dispatchNotifications(query.userId, flipMessage);
+        const flipSent = flipOutcomes.filter((o) => o.ok).length;
+        console.log(
+          `[notify] query=${query.id} availability flip no_options->available ` +
+            `channels=${flipOutcomes.length} sent=${flipSent} failed=${flipOutcomes.length - flipSent}`,
+        );
+        for (const o of flipOutcomes.filter((o) => !o.ok)) {
+          console.error(`[notify] query=${query.id} channel=${o.channelId} type=${o.type} flip failed: ${o.error}`);
+        }
       }
     } catch (err) {
       console.error(

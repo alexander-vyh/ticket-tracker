@@ -1,5 +1,5 @@
 import type { ChannelMessage } from './channels/types';
-import type { NewLowAlert } from './detect';
+import type { AvailabilityFlipAlert, NewLowAlert } from './detect';
 import { safeHttpUrl } from '@/lib/safe-url';
 import { formatCurrency } from '@/lib/currency';
 
@@ -47,6 +47,49 @@ export function formatNewLowMessage(params: {
       travelDate,
       bookingUrl: alert.bookingUrl,
       chartUrl,
+    },
+  };
+}
+
+/** Build a channel-agnostic message for a no_options -> available flip: a route
+ * that was sold out is now bookable. `baseUrl` is null when no public site URL
+ * is configured, in which case the message links to the fare's booking URL if
+ * one was captured this cycle. */
+export function formatAvailabilityFlipMessage(params: {
+  alert: AvailabilityFlipAlert;
+  route: AlertRoute;
+  baseUrl: string | null;
+}): ChannelMessage {
+  const { alert, route, baseUrl } = params;
+  const chartUrl = baseUrl ? `${baseUrl.replace(/\/+$/, '')}/q/${alert.queryId}` : '';
+  const url = chartUrl || safeHttpUrl(alert.bookingUrl);
+  const lane = `${route.origin} to ${route.destination}`;
+  const travelDate = alert.travelDate ? alert.travelDate.toISOString().slice(0, 10) : null;
+
+  const priceClause =
+    alert.currentMin != null
+      ? ` from ${formatPrice(alert.currentMin, alert.currency)}${alert.airline ? ` on ${alert.airline}` : ''}`
+      : '';
+  const dateClause = travelDate ? ` Travel date ${travelDate}.` : '';
+
+  const title = `Now available: ${lane}${alert.currentMin != null ? ` ${formatPrice(alert.currentMin, alert.currency)}` : ''}`;
+  const body = `${lane} is bookable again${priceClause} after previously showing no availability.${dateClause}`;
+
+  return {
+    title,
+    body,
+    url,
+    data: {
+      queryId: alert.queryId,
+      origin: route.origin,
+      destination: route.destination,
+      currentMin: alert.currentMin,
+      currency: alert.currency,
+      airline: alert.airline,
+      travelDate,
+      bookingUrl: alert.bookingUrl,
+      chartUrl,
+      kind: 'availability_flip',
     },
   };
 }

@@ -104,3 +104,79 @@ export async function detectNewLow(params: DetectNewLowParams): Promise<NewLowAl
     flightNumber: cheapest.flightNumber,
   };
 }
+
+/** A route that flipped from no-availability to bookable — worth alerting on. */
+export interface AvailabilityFlipAlert {
+  queryId: string;
+  /** Cheapest available fare found this cycle, if any snapshot was priced yet. */
+  currentMin: number | null;
+  currency: string | null;
+  airline: string | null;
+  bookingUrl: string | null;
+  travelDate: Date | null;
+  flightNumber: string | null;
+}
+
+export interface DetectAvailabilityFlipParams {
+  query: { id: string; currency: string | null };
+  /** Boundary of this scrape cycle: the flip's "available" run must be at/after
+   *  it and the prior "no_options" run strictly before it. */
+  cycleStartedAt: Date;
+}
+
+/**
+ * Detect a query whose availability just flipped no_options -> available: a
+ * route that was sold out on its previous determination but now has bookable
+ * fares.
+ *
+ * Compares the two most recent FetchRuns that actually made an availability
+ * determination (availability != null; throttled / non-market runs record null
+ * and are skipped so they can't mask a flip). Fires only when the newer run is
+ * from THIS cycle AND the older is from a PRIOR cycle — a genuine temporal
+ * flip. The prior-cycle guard also prevents a false positive when one sibling
+ * pass in the SAME cycle is no_options and another is available (a cross-country
+ * difference, not a route becoming available). Transition-based: a sustained
+ * 'available' state fires exactly once, not every cycle.
+ */
+export async function detectAvailabilityFlip(
+  params: DetectAvailabilityFlipParams,
+): Promise<AvailabilityFlipAlert | null> {
+  const { query, cycleStartedAt } = params;
+
+  const runs = await prisma.fetchRun.findMany({
+    where: { queryId: query.id, availability: { not: null } },
+    orderBy: { startedAt: 'desc' },
+    take: 2,
+    select: { availability: true, startedAt: true },
+  });
+  if (runs.length < 2) return null;
+  const [current, previous] = runs;
+
+  // A genuine temporal flip: the newer determination is this cycle's, the older
+  // one predates this cycle. Rejects stale re-alerts (newer run not fresh) and
+  // same-cycle cross-sibling differences (older run not from a prior cycle).
+  if (!current!.startedAt || current!.startedAt < cycleStartedAt) return null;
+  if (!previous!.startedAt || previous!.startedAt >= cycleStartedAt) return null;
+  if (previous!.availability !== 'no_options' || current!.availability !== 'available') {
+    return null;
+  }
+
+  // Best available fare this cycle for the message. Optional: the flip is real
+  // even if snapshots are still landing, so a null price still alerts.
+  const currencyFilter = query.currency ? { currency: query.currency } : {};
+  const cheapest = await prisma.priceSnapshot.findFirst({
+    where: { queryId: query.id, status: 'available', scrapedAt: { gte: cycleStartedAt }, ...currencyFilter },
+    orderBy: { price: 'asc' },
+    select: { price: true, airline: true, bookingUrl: true, travelDate: true, currency: true, flightNumber: true },
+  });
+
+  return {
+    queryId: query.id,
+    currentMin: cheapest?.price ?? null,
+    currency: cheapest?.currency ?? query.currency,
+    airline: cheapest?.airline ?? null,
+    bookingUrl: cheapest?.bookingUrl ?? null,
+    travelDate: cheapest?.travelDate ?? null,
+    flightNumber: cheapest?.flightNumber ?? null,
+  };
+}

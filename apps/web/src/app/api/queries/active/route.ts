@@ -51,7 +51,7 @@ export async function GET() {
       fetchRuns: {
         orderBy: { startedAt: 'desc' },
         take: 1,
-        select: { startedAt: true, status: true, error: true },
+        select: { startedAt: true, status: true, error: true, availability: true },
       },
       _count: {
         select: { snapshots: true },
@@ -73,6 +73,7 @@ export async function GET() {
     lastScrapedAt: q.fetchRuns[0]?.startedAt.toISOString() ?? null,
     lastScrapeStatus: q.fetchRuns[0]?.status ?? null,
     lastScrapeError: q.fetchRuns[0]?.error ?? null,
+    lastScrapeAvailability: q.fetchRuns[0]?.availability ?? null,
     groupId: q.groupId,
     label: q.label,
     preferredAggregators: q.preferredAggregators,

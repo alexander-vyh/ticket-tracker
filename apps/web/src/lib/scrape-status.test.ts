@@ -74,4 +74,36 @@ describe('aggregateScrapeStatus', () => {
     ]);
     expect(result.status).toBe('success');
   });
+
+  it('renders a success with availability=no_options as no_options (not a green success)', () => {
+    // The canonical LAX-AKL family RT: the scrape SUCCEEDED but the route is
+    // genuinely sold out. Must read as no_options, not a priced success.
+    const result = aggregateScrapeStatus([
+      sib({ status: 'success', availability: 'no_options', startedAt: '2026-05-20T10:00:00Z' }),
+    ]);
+    expect(result.status).toBe('no_options');
+  });
+
+  it('a plain available success is unaffected', () => {
+    const result = aggregateScrapeStatus([
+      sib({ status: 'success', availability: 'available', startedAt: '2026-05-20T10:00:00Z' }),
+    ]);
+    expect(result.status).toBe('success');
+  });
+
+  it('an available sibling outranks a no_options sibling (a bookable option wins)', () => {
+    const result = aggregateScrapeStatus([
+      sib({ status: 'success', availability: 'no_options', startedAt: '2026-05-20T10:00:00Z' }),
+      sib({ status: 'success', availability: 'available', startedAt: '2026-05-20T11:00:00Z' }),
+    ]);
+    expect(result.status).toBe('success');
+  });
+
+  it('failed still outranks no_options (an error needs attention first)', () => {
+    const result = aggregateScrapeStatus([
+      sib({ status: 'success', availability: 'no_options', startedAt: '2026-05-20T10:00:00Z' }),
+      sib({ status: 'failed', error: 'boom', startedAt: '2026-05-20T11:00:00Z' }),
+    ]);
+    expect(result.status).toBe('failed');
+  });
 });

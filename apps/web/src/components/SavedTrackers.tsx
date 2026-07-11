@@ -24,6 +24,7 @@ interface ActiveQuery {
   lastScrapedAt: string | null;
   lastScrapeStatus: string | null;
   lastScrapeError: string | null;
+  lastScrapeAvailability: string | null;
   groupId: string | null;
   label: string | null;
   preferredAggregators: string[];
@@ -39,6 +40,7 @@ interface DisplayQuery extends GroupableQuery {
   hasDeleteToken: boolean;
   scrapeStatus: string | null;
   scrapeError: string | null;
+  scrapeAvailability: string | null;
   label?: string | null;
   adults?: number;
   children?: number;
@@ -91,6 +93,7 @@ function toDisplayGroups(queries: DisplayQuery[]): DisplayGroup[] {
         status: q.scrapeStatus,
         error: q.scrapeError,
         startedAt: q.lastScrapedAt ?? null,
+        availability: q.scrapeAvailability,
       })),
     ),
   }));
@@ -143,6 +146,7 @@ export function SavedTrackers({ isAuthenticated = false }: { isAuthenticated?: b
             hasDeleteToken: deleteTokenSet.has(q.id),
             scrapeStatus: q.lastScrapeStatus,
             scrapeError: q.lastScrapeError,
+            scrapeAvailability: q.lastScrapeAvailability,
             adults: q.adults,
             children: q.children,
             infantsInSeat: q.infantsInSeat,
@@ -186,6 +190,7 @@ export function SavedTrackers({ isAuthenticated = false }: { isAuthenticated?: b
             hasDeleteToken: Boolean(t.deleteToken),
             scrapeStatus: null,
             scrapeError: null,
+            scrapeAvailability: null,
           }));
           setGroups(toDisplayGroups(display));
         })
@@ -206,6 +211,7 @@ export function SavedTrackers({ isAuthenticated = false }: { isAuthenticated?: b
             hasDeleteToken: Boolean(t.deleteToken),
             scrapeStatus: null,
             scrapeError: null,
+            scrapeAvailability: null,
           }));
           setGroups(toDisplayGroups(display));
         });
@@ -267,6 +273,7 @@ export function SavedTrackers({ isAuthenticated = false }: { isAuthenticated?: b
           hasDeleteToken: localTokens.has(q.id),
           scrapeStatus: q.lastScrapeStatus,
           scrapeError: q.lastScrapeError,
+          scrapeAvailability: q.lastScrapeAvailability,
           adults: q.adults,
           children: q.children,
           infantsInSeat: q.infantsInSeat,

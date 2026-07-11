@@ -18,6 +18,7 @@ export interface AdminQuery extends GroupableQuery {
   runCount: number;
   scrapeStatus: string | null;
   scrapeError: string | null;
+  scrapeAvailability: string | null;
 }
 
 function formatDate(iso: string): string {
@@ -37,6 +38,7 @@ export function QueryGroupRow({ group }: { group: QueryGroup<AdminQuery> }) {
       status: q.scrapeStatus,
       error: q.scrapeError,
       startedAt: q.lastScrapedAt ?? null,
+      availability: q.scrapeAvailability,
     })),
   );
 

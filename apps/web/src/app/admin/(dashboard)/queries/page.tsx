@@ -14,7 +14,7 @@ export default async function QueriesPage() {
       fetchRuns: {
         orderBy: { startedAt: 'desc' },
         take: 1,
-        select: { startedAt: true, status: true, error: true },
+        select: { startedAt: true, status: true, error: true, availability: true },
       },
     },
   });
@@ -39,6 +39,7 @@ export default async function QueriesPage() {
     lastScrapedAt: q.fetchRuns[0]?.startedAt.toISOString() ?? null,
     scrapeStatus: q.fetchRuns[0]?.status ?? null,
     scrapeError: q.fetchRuns[0]?.error ?? null,
+    scrapeAvailability: q.fetchRuns[0]?.availability ?? null,
   }));
 
   const groups = groupQueries(adminRows);

@@ -134,7 +134,7 @@ interface QueryWithSnapshots {
     editedAt: string;
     summary: string;
   }>;
-  lastRun: { startedAt: Date; status: string; error: string | null } | null;
+  lastRun: { startedAt: Date; status: string; error: string | null; availability: string | null } | null;
   globalScrapeInterval: number;
 }
 
@@ -258,7 +258,7 @@ async function loadQueryWithSnapshots(id: string): Promise<QueryWithSnapshots | 
   const lastRun = await prisma.fetchRun.findFirst({
     where: { queryId: id },
     orderBy: { startedAt: 'desc' },
-    select: { startedAt: true, status: true, error: true },
+    select: { startedAt: true, status: true, error: true, availability: true },
   });
 
   const globalConfig = await prisma.extractionConfig.findFirst({
@@ -371,6 +371,7 @@ export default async function ChartPage({ params }: Props) {
       status: q.lastRun?.status ?? null,
       error: q.lastRun?.error ?? null,
       startedAt: q.lastRun?.startedAt.toISOString() ?? null,
+      availability: q.lastRun?.availability ?? null,
     })),
   );
 

@@ -16,6 +16,7 @@ function statusLabel(status: ScrapeStatus): string {
     case 'failed': return 'failed';
     case 'partial': return 'partial';
     case 'in_progress': return 'in progress';
+    case 'no_options': return 'no availability';
   }
 }
 

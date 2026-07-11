@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 const mockFindFirst = vi.fn();
 const mockAggregate = vi.fn();
+const mockFetchRunFindMany = vi.fn();
 
 vi.mock('@/lib/prisma', () => ({
   prisma: {
@@ -9,10 +10,13 @@ vi.mock('@/lib/prisma', () => ({
       findFirst: (...args: unknown[]) => mockFindFirst(...args),
       aggregate: (...args: unknown[]) => mockAggregate(...args),
     },
+    fetchRun: {
+      findMany: (...args: unknown[]) => mockFetchRunFindMany(...args),
+    },
   },
 }));
 
-import { detectNewLow } from './detect';
+import { detectNewLow, detectAvailabilityFlip } from './detect';
 
 const CYCLE_START = new Date('2026-06-04T00:00:00Z');
 const TRAVEL = new Date('2026-08-01T00:00:00Z');
@@ -140,5 +144,87 @@ describe('detectNewLow', () => {
     mockAggregate.mockResolvedValue({ _min: { price: 300 } });
     const alert = await run({ query: { id: 'q1', currency: 'EUR', lastNotifiedLowPrice: null } });
     expect(alert?.currency).toBe('EUR');
+  });
+});
+
+describe('detectAvailabilityFlip', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  const AFTER = new Date('2026-06-04T02:00:00Z'); // >= CYCLE_START (this cycle)
+  const BEFORE = new Date('2026-06-03T02:00:00Z'); // < CYCLE_START (a prior cycle)
+
+  /** Stub the two most-recent availability-bearing runs (newest first) plus the
+   *  cheapest available fare this cycle. */
+  function arrangeRuns(runs: Array<{ availability: string; startedAt: Date }>) {
+    mockFetchRunFindMany.mockResolvedValue(runs);
+    mockFindFirst.mockResolvedValue({
+      price: 512,
+      airline: 'Fiji Airways',
+      bookingUrl: 'https://book.example/fj',
+      travelDate: TRAVEL,
+      currency: 'USD',
+      flightNumber: 'FJ 810',
+    });
+  }
+  const flip = () =>
+    detectAvailabilityFlip({ query: { id: 'q1', currency: 'USD' }, cycleStartedAt: CYCLE_START });
+
+  it('fires exactly once on a no_options -> available flip (positive control)', async () => {
+    arrangeRuns([
+      { availability: 'available', startedAt: AFTER }, // current, this cycle
+      { availability: 'no_options', startedAt: BEFORE }, // previous, prior cycle
+    ]);
+    const alert = await flip();
+    expect(alert).not.toBeNull();
+    expect(alert).toMatchObject({ queryId: 'q1', currentMin: 512, airline: 'Fiji Airways' });
+  });
+
+  it('stays silent on two consecutive no_options runs (negative control)', async () => {
+    arrangeRuns([
+      { availability: 'no_options', startedAt: AFTER },
+      { availability: 'no_options', startedAt: BEFORE },
+    ]);
+    expect(await flip()).toBeNull();
+  });
+
+  it('stays silent when already available last cycle (available -> available)', async () => {
+    arrangeRuns([
+      { availability: 'available', startedAt: AFTER },
+      { availability: 'available', startedAt: BEFORE },
+    ]);
+    expect(await flip()).toBeNull();
+  });
+
+  it('needs two determinations — a single run never flips', async () => {
+    arrangeRuns([{ availability: 'available', startedAt: AFTER }]);
+    expect(await flip()).toBeNull();
+  });
+
+  it('ignores a same-cycle cross-sibling difference (both runs from this cycle)', async () => {
+    const AFTER2 = new Date('2026-06-04T03:00:00Z');
+    arrangeRuns([
+      { availability: 'available', startedAt: AFTER2 },
+      { availability: 'no_options', startedAt: AFTER }, // also this cycle -> not temporal
+    ]);
+    expect(await flip()).toBeNull();
+  });
+
+  it('does not re-alert a stale flip when this cycle produced no fresh determination', async () => {
+    arrangeRuns([
+      { availability: 'available', startedAt: BEFORE }, // newest run predates this cycle
+      { availability: 'no_options', startedAt: new Date('2026-06-02T00:00:00Z') },
+    ]);
+    expect(await flip()).toBeNull();
+  });
+
+  it('reports the flip even if no fare was priced yet this cycle', async () => {
+    mockFetchRunFindMany.mockResolvedValue([
+      { availability: 'available', startedAt: AFTER },
+      { availability: 'no_options', startedAt: BEFORE },
+    ]);
+    mockFindFirst.mockResolvedValue(null); // snapshots still landing
+    const alert = await flip();
+    expect(alert).not.toBeNull();
+    expect(alert?.currentMin).toBeNull();
   });
 });
