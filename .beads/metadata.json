@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "ticket_tracker",
+  "project_id": "9a58d557-f076-494e-aefc-068f70bef9e5"
+}
