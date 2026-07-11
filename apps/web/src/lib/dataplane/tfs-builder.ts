@@ -32,7 +32,11 @@ export interface TfsPassengers {
   infantsOnLap?: number;
 }
 
-export type TfsTrip = 'round-trip' | 'one-way';
+// 'open-jaw' is a two-segment itinerary whose return does not reverse the
+// outbound (e.g. LAX→AKL then CHC→LAX). On the wire Google treats it as a
+// multi-city itinerary (trip enum 3), same as 'multi-city' with N segments —
+// the distinct name exists only so callers/UI can label the common 2-leg case.
+export type TfsTrip = 'round-trip' | 'one-way' | 'open-jaw' | 'multi-city';
 export type TfsSeat = 'economy' | 'premium-economy' | 'business' | 'first';
 
 export interface TfsQuery {
@@ -52,6 +56,8 @@ const SEAT_ENUM: Record<TfsSeat, number> = {
 const TRIP_ENUM: Record<TfsTrip, number> = {
   'round-trip': 1,
   'one-way': 2,
+  'open-jaw': 3, // Google Trip.MULTI_CITY — an open-jaw is a 2-leg multi-city
+  'multi-city': 3,
 };
 
 const PASSENGER_ENUM = { adult: 1, child: 2, infantInSeat: 3, infantOnLap: 4 } as const;
@@ -120,14 +126,41 @@ function passengerList(p: TfsPassengers): number[] {
   ];
 }
 
+/**
+ * Enforce Google's segment-count rules per trip type: one-way = exactly 1,
+ * round-trip = exactly 2 (and the return must reverse the outbound — a
+ * non-reversing 2-leg trip is an open-jaw, not a round-trip), open-jaw =
+ * exactly 2, multi-city = 2 or more.
+ */
+function validateSegmentCount(query: TfsQuery): void {
+  const n = query.segments.length;
+  switch (query.trip) {
+    case 'one-way':
+      if (n !== 1) throw new Error(`one-way requires exactly 1 segment, got ${n}`);
+      return;
+    case 'round-trip': {
+      if (n !== 2) throw new Error(`round-trip requires exactly 2 segments, got ${n}`);
+      const [out, ret] = query.segments;
+      if (out!.fromAirport !== ret!.toAirport || out!.toAirport !== ret!.fromAirport) {
+        throw new Error(
+          'round-trip return must reverse the outbound (same city pair); ' +
+            "use trip 'open-jaw' for a return from/to a different airport",
+        );
+      }
+      return;
+    }
+    case 'open-jaw':
+      if (n !== 2) throw new Error(`open-jaw requires exactly 2 segments, got ${n}`);
+      return;
+    case 'multi-city':
+      if (n < 2) throw new Error(`multi-city requires at least 2 segments, got ${n}`);
+      return;
+  }
+}
+
 /** Build the base64 `tfs` parameter value for a query. */
 export function buildTfs(query: TfsQuery): string {
-  const expectedSegments = query.trip === 'round-trip' ? 2 : 1;
-  if (query.segments.length !== expectedSegments) {
-    throw new Error(
-      `${query.trip} requires exactly ${expectedSegments} segment(s), got ${query.segments.length}`,
-    );
-  }
+  validateSegmentCount(query);
   const bytes: number[] = [];
   for (const seg of query.segments) bytes.push(...lenDelimited(3, encodeSegment(seg)));
   bytes.push(...lenDelimited(8, passengerList(query.passengers))); // packed enums
