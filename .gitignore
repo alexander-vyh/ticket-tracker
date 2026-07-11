@@ -1,6 +1,30 @@
 
-# Beads / Dolt files (added by bd init)
-.dolt/
-*.db
+!.env.example
 .beads-credential-key
 .beads/proxieddb/
+.dolt/
+.doppler.yaml
+.DS_Store
+.env
+.env.*
+.next/
+.turbo
+.vercel
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+*.tsbuildinfo
+# Beads / Dolt files (added by bd init)
+# Demo recordings — only keep the final GIF
+# Prisma 7 generated client (run `prisma generate`)
+apps/web/src/generated/
+default.profraw
+dist/
+next-env.d.ts
+node_modules/
+out/
+packages/cli/demo/*.mov
+packages/cli/demo/*.mp4
+packages/cli/demo/*.tape
+Thumbs.db

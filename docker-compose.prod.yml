@@ -1,0 +1,74 @@
+services:
+  db:
+    image: docker.io/library/postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: flight_finder
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  redis:
+    image: docker.io/library/redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redisdata:/data
+    ports:
+      - "127.0.0.1:6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  web:
+    image: ghcr.io/affromero/flight-finder:latest
+    restart: unless-stopped
+    init: true
+    ipc: host
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:3003:3003"
+    volumes:
+      - /home/sotto/.claude:/home/node/.claude-host:ro
+      - analytics-data:/app/data
+      - cli-cache:/home/node/.npm-global
+    environment:
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@db:5432/flight_finder
+      REDIS_URL: redis://redis:6379
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      GOOGLE_AI_API_KEY: ${GOOGLE_AI_API_KEY}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+      ADMIN_SESSION_SECRET: ${ADMIN_SESSION_SECRET}
+      CRON_SECRET: ${CRON_SECRET}
+      CHROME_PATH: /usr/bin/chromium-browser
+      # Pin the analytics SQLite path to the mounted volume. The default derives
+      # from process.cwd() (/app/apps/web/data), which is NOT the volume mount
+      # below, so without this the analytics history would not survive a
+      # container recreate.
+      ANALYTICS_DB_PATH: /app/data/analytics.db
+      NODE_ENV: production
+      # flight-finder.org is the ONLY hosted deployment. The image defaults to
+      # self-hosted, so this opt-out is explicit. CLI providers stay installed
+      # (the Claude Code provider runs here via the mounted host auth above).
+      SELF_HOSTED: "false"
+      INSTALL_CLI_PROVIDERS: "true"
+
+volumes:
+  pgdata:
+  redisdata:
+  analytics-data:
+  cli-cache:

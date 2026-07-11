@@ -1,0 +1,33 @@
+{
+  "name": "flight-finder",
+  "private": true,
+  "workspaces": [
+    "apps/web",
+    "packages/cli"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspace=@flight-finder/web",
+    "build": "npm run build --workspace=@flight-finder/web",
+    "lint": "npm run lint --workspace=@flight-finder/web && npm run lint --workspace=@flight-finder/cli",
+    "typecheck": "npm run typecheck --workspace=@flight-finder/web && npm run typecheck --workspace=@flight-finder/cli",
+    "test": "npm run test --workspace=@flight-finder/web && npm run test --workspace=@flight-finder/cli",
+    "cli": "doppler run -- node --import tsx/esm --import ./packages/cli/register.mjs packages/cli/src/index.tsx --headless",
+    "cli:dev": "npm run dev --workspace=@flight-finder/cli",
+    "ci": "npm run lint && npm run typecheck && npm run test && npm run build && npm run build --workspace=@flight-finder/cli",
+    "db:push": "npx prisma db push --schema=apps/web/prisma/schema.prisma",
+    "db:generate": "npx prisma generate --schema=apps/web/prisma/schema.prisma",
+    "db:migrate": "npx prisma migrate deploy --schema=apps/web/prisma/schema.prisma"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "version": "0.13.0",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.110.0",
+    "@google/generative-ai": "^0.24.1",
+    "openai": "^6.45.0"
+  },
+  "devDependencies": {
+    "@copilotkit/llmock": "^1.3.1"
+  }
+}
