@@ -38,10 +38,12 @@ import {
   pairToTfsQuery,
   adultsOnlyVariant,
   priceDataToDataplaneFlight,
+  dataplaneFlightToPriceData,
   createFetchBrowserAdapter,
   createCanaryHasInventory,
   runTwoTierGoogleFlights,
 } from './dataplane-integration';
+import type { DataplaneFlight } from '../dataplane/types';
 
 const PAIR_PARAMS: FlightSearchParams = {
   origin: 'LAX',
@@ -129,6 +131,55 @@ describe('priceDataToDataplaneFlight', () => {
     expect(flight.airlines).toEqual(['American']);
     expect(flight.legs[0]!.fromAirport).toBe('LAX');
     expect(flight.legs[0]!.toAirport).toBe('AKL');
+  });
+});
+
+describe('dataplaneFlightToPriceData', () => {
+  // oracle: direct payload evidence (Serena memory dataplane/ssr-roundtrip-legs-semantics,
+  // ssr-builder agent, 2026-07-10, captured fixture adults-only-with-results.html,
+  // LAX-AKL RT 2026-12-18/2027-01-08, 3 adults): every round-trip SSR option has
+  // legs.length === 1 (outbound only — Google's SSR never renders return-leg
+  // detail), while price is nonetheless the round-trip total ($6,448 measured).
+
+  it('maps a round-trip SSR flight (outbound-only legs) using the outbound schedule and the RT total price', () => {
+    const rtFlight: DataplaneFlight = {
+      price: 6448,
+      airlines: ['American'],
+      legs: [
+        {
+          fromAirport: 'LAX', fromAirportName: 'Los Angeles', toAirport: 'AKL', toAirportName: 'Auckland',
+          departureDate: [2026, 12, 18], departureTime: [13, 0], arrivalDate: [2026, 12, 19], arrivalTime: [7, 30],
+          duration: 800, planeType: '787',
+        },
+      ],
+    };
+    const p = dataplaneFlightToPriceData(rtFlight, '2026-12-18', 'USD');
+
+    expect(p.price).toBe(6448);
+    expect(p.airline).toBe('American');
+    expect(p.travelDate).toBe('2026-12-18');
+    expect(p.departureTime).toBe('13:00');
+    expect(p.arrivalTime).toBe('07:30');
+    expect(p.duration).toBe('13h 20m');
+    expect(p.stops).toBe(0);
+    // No return-leg data exists in the SSR payload at all — never fabricated.
+    expect(p.flightNumber).toBeNull();
+    expect(p.bookingUrl).toBeNull();
+  });
+
+  it('falls back to the caller-supplied travel date when the leg carries no departure date', () => {
+    const flight: DataplaneFlight = {
+      price: 500,
+      airlines: ['Delta'],
+      legs: [{ fromAirport: 'JFK', fromAirportName: null, toAirport: 'LAX', toAirportName: null, departureDate: null, departureTime: null, arrivalDate: null, arrivalTime: null, duration: null, planeType: null }],
+    };
+    expect(dataplaneFlightToPriceData(flight, '2026-06-15', 'USD').travelDate).toBe('2026-06-15');
+  });
+
+  it('counts stops from the outbound leg segments only (2 segments = 1 stop)', () => {
+    const leg = { fromAirport: 'LAX', fromAirportName: null, toAirport: 'HNL', toAirportName: null, departureDate: null, departureTime: null, arrivalDate: null, arrivalTime: null, duration: null, planeType: null };
+    const flight: DataplaneFlight = { price: 900, airlines: ['United'], legs: [leg, { ...leg, fromAirport: 'HNL', toAirport: 'AKL' }] };
+    expect(dataplaneFlightToPriceData(flight, '2026-06-15', 'USD').stops).toBe(1);
   });
 });
 
@@ -302,5 +353,35 @@ describe('runTwoTierGoogleFlights (full integration through the real orchestrate
     expect(result.prices).toEqual([SAMPLE_PRICE]);
     expect(result.canaryOk).toBeNull();
     expect(mockFetchSsr).not.toHaveBeenCalled();
+  });
+
+  it('SSR-tier success path (adults-only, no children) persists real prices from the SSR result, WITHOUT ever touching the browser', async () => {
+    // Regression control: orchestrateScrape's SSR-success branch returns its
+    // flights on the RESULT itself (never calling fetchBrowser at all), not
+    // via the browser adapter's capture. A naive wrapper that only reads
+    // browserAdapter.getPrices() would silently persist ZERO snapshots for
+    // every successful SSR-tier hit -- exactly the fast, no-browser-needed
+    // case the two-tier design exists to serve efficiently.
+    const adultsOnlyDeps = { ...baseDeps, passengers: { adults: 3, children: 0, infantsInSeat: 0, infantsOnLap: 0 } };
+    const ssrFlight: DataplaneFlight = {
+      price: 6448,
+      airlines: ['American'],
+      legs: [{
+        fromAirport: 'LAX', fromAirportName: 'Los Angeles', toAirport: 'AKL', toAirportName: 'Auckland',
+        departureDate: [2026, 12, 18], departureTime: [13, 0], arrivalDate: [2026, 12, 19], arrivalTime: [7, 30],
+        duration: 800, planeType: '787',
+      }],
+    };
+    mockFetchSsr.mockResolvedValue({ status: 'ok', flights: [ssrFlight] });
+
+    const result = await runTwoTierGoogleFlights(adultsOnlyDeps);
+
+    expect(result.availability).toBe('available');
+    expect(result.tier).toBe('ssr');
+    expect(result.prices).toEqual([dataplaneFlightToPriceData(ssrFlight, '2026-12-18', 'USD')]);
+    expect(result.prices.length).toBeGreaterThan(0);
+    expect(mockNavigateGoogleFlightsUrl).not.toHaveBeenCalled();
+    expect(mockNavigateGoogleFlights).not.toHaveBeenCalled();
+    expect(mockExtractPrices).not.toHaveBeenCalled();
   });
 });

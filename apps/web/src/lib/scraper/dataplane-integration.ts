@@ -109,6 +109,52 @@ export function priceDataToDataplaneFlight(p: PriceData, origin: string, destina
   };
 }
 
+function isoFromDataplaneDate(d: number[] | null): string | null {
+  if (!d || d.length < 3) return null;
+  const [y, m, day] = d;
+  return `${y}-${String(m).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+}
+
+function formatDataplaneTime(t: (number | null)[] | null): string | null {
+  if (!t || t[0] == null) return null;
+  return `${String(t[0]).padStart(2, '0')}:${String(t[1] ?? 0).padStart(2, '0')}`;
+}
+
+/**
+ * Maps an SSR-tier (Tier 1) DataplaneFlight back into a persistable PriceData
+ * row. This is the ONLY place tier-1 flights get converted to a snapshot —
+ * unlike the browser-tier adapter, SSR has no separate "original PriceData"
+ * to preserve, since DataplaneFlight IS its native shape.
+ *
+ * For round-trip queries, Google's SSR payload carries ONLY the outbound leg
+ * — the return leg's flight number/times/plane are never present at all
+ * (Google's SSR renders "pick your outbound" cards with a precomputed RT
+ * total; see Serena memory dataplane/ssr-roundtrip-legs-semantics, direct
+ * payload evidence 2026-07-10). `legs[0]` is therefore always treated as the
+ * outbound schedule, and `price` as whatever total SSR reports (single-leg
+ * total for one-way, RT total for round-trip) — this mapping never
+ * fabricates return-leg detail. DataplaneLeg carries no flight-number field
+ * at all, so flightNumber is always null here (matches what SSR actually
+ * gives us, not a gap in this mapping).
+ */
+export function dataplaneFlightToPriceData(flight: DataplaneFlight, fallbackTravelDate: string, currency: string): PriceData {
+  const outbound = flight.legs[0];
+  const durationMin = outbound?.duration ?? null;
+  return {
+    travelDate: isoFromDataplaneDate(outbound?.departureDate ?? null) ?? fallbackTravelDate,
+    price: flight.price,
+    currency,
+    airline: flight.airlines[0] ?? 'Unknown',
+    bookingUrl: null,
+    stops: Math.max(0, flight.legs.length - 1),
+    duration: durationMin != null ? `${Math.floor(durationMin / 60)}h ${durationMin % 60}m` : null,
+    departureTime: formatDataplaneTime(outbound?.departureTime ?? null),
+    arrivalTime: formatDataplaneTime(outbound?.arrivalTime ?? null),
+    seatsLeft: null,
+    flightNumber: null,
+  };
+}
+
 export interface FetchBrowserAdapterDeps {
   pairParams: FlightSearchParams;
   filters: QueryFilters;
@@ -292,8 +338,17 @@ export async function runTwoTierGoogleFlights(deps: TwoTierDeps): Promise<TwoTie
   const failureReason = browserAdapter.getFailureReason();
   const isNonMarketFailure = failureReason !== undefined && NON_MARKET_FAILURE_REASONS.has(failureReason);
 
+  // The SSR (tier-1) success path never calls fetchBrowser at all — the real
+  // flight data lives in orchestrateScrape's OWN return value (result.flights),
+  // not in the browser adapter's capture. Mapping is required here (SSR has
+  // no separate "original PriceData" the way the browser tier does).
+  const prices =
+    result.tier === 'ssr'
+      ? result.flights.map((f) => dataplaneFlightToPriceData(f, deps.travelDateFallback, deps.pairParams.currency ?? 'USD'))
+      : browserAdapter.getPrices();
+
   return {
-    prices: browserAdapter.getPrices(),
+    prices,
     usage: browserAdapter.getUsage(),
     failureReason,
     availability: isNonMarketFailure ? undefined : result.availability,
