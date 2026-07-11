@@ -25,6 +25,10 @@ model Query {
   timePreference  String   @default("any")
   cabinClass      String   @default("economy")
   tripType        String   @default("round_trip") // 'one_way' | 'round_trip'
+  adults          Int      @default(1)
+  children        Int      @default(0) // aged 2-11 per Google Flights
+  infantsInSeat   Int      @default(0)
+  infantsOnLap    Int      @default(0) // must not exceed adults (airline rule)
   currency        String?
   groupId         String?  // links sibling queries created from the same multi-route search
   deleteToken     String?
@@ -86,6 +90,7 @@ model PriceSnapshot {
   status            String   @default("available") // 'available' | 'sold_out'
   airlineDirectPrice Float?
   vpnCountry        String?  // ISO 3166-1 alpha-2 — VPN exit country during scrape
+  sourceTier        String   @default("browser_llm") // 'ssr' | 'browser_llm' — which data-plane tier produced this price
   scrapedAt         DateTime @default(now())
   fetchRunId        String?
 
@@ -105,6 +110,9 @@ model FetchRun {
   snapshotsCount Int       @default(0)
   extractionCost Float?
   vpnCountry     String?   // ISO 3166-1 alpha-2 — VPN exit country during this run
+  tier           String    @default("browser_llm") // 'ssr' | 'browser_llm' | 'ssr+browser_llm' (tier-1 deferred, fell back)
+  availability   String?   // 'available' | 'no_options' | 'throttled' — no_options may ONLY be recorded when the run's canary succeeded; throttled runs record NO snapshots
+  canaryOk       Boolean?  // browser-tier runs: did the known-inventory canary succeed (null = not applicable / ssr tier)
   error          String?
   startedAt      DateTime  @default(now())
   completedAt    DateTime?
