@@ -28,3 +28,4 @@ packages/cli/demo/*.mov
 packages/cli/demo/*.mp4
 packages/cli/demo/*.tape
 Thumbs.db
+**/dataplane/scratch/
