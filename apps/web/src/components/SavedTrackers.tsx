@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { getSavedTrackers, getDeleteToken, removeSavedTracker, type SavedTracker } from '@/lib/tracker-storage';
 import { groupQueries, type GroupableQuery, type QueryGroup } from '@/lib/query-grouping';
 import { aggregateScrapeStatus, type AggregatedScrape } from '@/lib/scrape-status';
+import { passengerSummary } from '@/lib/passenger-summary';
 import { ScrapeStatusDot } from './ScrapeStatusDot';
 import { ForceScrapeButton } from './ForceScrapeButton';
 import styles from './SavedTrackers.module.css';
@@ -27,6 +28,10 @@ interface ActiveQuery {
   label: string | null;
   preferredAggregators: string[];
   createdAt: string;
+  adults?: number;
+  children?: number;
+  infantsInSeat?: number;
+  infantsOnLap?: number;
 }
 
 interface DisplayQuery extends GroupableQuery {
@@ -35,6 +40,10 @@ interface DisplayQuery extends GroupableQuery {
   scrapeStatus: string | null;
   scrapeError: string | null;
   label?: string | null;
+  adults?: number;
+  children?: number;
+  infantsInSeat?: number;
+  infantsOnLap?: number;
 }
 
 interface DisplayGroup {
@@ -134,6 +143,10 @@ export function SavedTrackers({ isAuthenticated = false }: { isAuthenticated?: b
             hasDeleteToken: deleteTokenSet.has(q.id),
             scrapeStatus: q.lastScrapeStatus,
             scrapeError: q.lastScrapeError,
+            adults: q.adults,
+            children: q.children,
+            infantsInSeat: q.infantsInSeat,
+            infantsOnLap: q.infantsOnLap,
           }));
           setGroups(toDisplayGroups(display));
         } else {
@@ -254,6 +267,10 @@ export function SavedTrackers({ isAuthenticated = false }: { isAuthenticated?: b
           hasDeleteToken: localTokens.has(q.id),
           scrapeStatus: q.lastScrapeStatus,
           scrapeError: q.lastScrapeError,
+          adults: q.adults,
+          children: q.children,
+          infantsInSeat: q.infantsInSeat,
+          infantsOnLap: q.infantsOnLap,
         }));
         setGroups(toDisplayGroups(display));
       })
@@ -315,6 +332,15 @@ export function SavedTrackers({ isAuthenticated = false }: { isAuthenticated?: b
           const extraDestinations = group.destinations.length - 1;
           const primaryToken = getDeleteToken(group.primaryId);
           const primaryLabel = group.queries.find((q) => q.id === group.primaryId)?.label;
+          const primaryPax = group.queries.find((q) => q.id === group.primaryId);
+          const paxSummary = primaryPax
+            ? passengerSummary({
+                adults: primaryPax.adults ?? 1,
+                children: primaryPax.children ?? 0,
+                infantsInSeat: primaryPax.infantsInSeat ?? 0,
+                infantsOnLap: primaryPax.infantsOnLap ?? 0,
+              })
+            : null;
           return (
             <div key={group.primaryId} className={styles.card}>
               <button
@@ -355,6 +381,9 @@ export function SavedTrackers({ isAuthenticated = false }: { isAuthenticated?: b
                     <span className={styles.dates}>
                       {formatDate(group.dateFrom)} &mdash; {formatDate(group.dateTo)}
                     </span>
+                    {paxSummary && (
+                      <span className={styles.dates}>{paxSummary}</span>
+                    )}
                     <div className={styles.meta}>
                       {group.routeCount > 1 && (
                         <span className={styles.snapshots}>

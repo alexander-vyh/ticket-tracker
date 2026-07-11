@@ -44,6 +44,10 @@ export async function GET() {
       groupId: true,
       label: true,
       preferredAggregators: true,
+      adults: true,
+      children: true,
+      infantsInSeat: true,
+      infantsOnLap: true,
       fetchRuns: {
         orderBy: { startedAt: 'desc' },
         take: 1,
@@ -72,6 +76,10 @@ export async function GET() {
     groupId: q.groupId,
     label: q.label,
     preferredAggregators: q.preferredAggregators,
+    adults: q.adults,
+    children: q.children,
+    infantsInSeat: q.infantsInSeat,
+    infantsOnLap: q.infantsOnLap,
     createdAt: q.createdAt.toISOString(),
   }));
 

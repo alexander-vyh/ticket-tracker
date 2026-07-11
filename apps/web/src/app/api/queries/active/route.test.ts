@@ -30,6 +30,10 @@ function shapedRow(overrides: Record<string, unknown> = {}) {
     preferredAggregators: [],
     fetchRuns: [],
     _count: { snapshots: 0 },
+    adults: 1,
+    children: 0,
+    infantsInSeat: 0,
+    infantsOnLap: 0,
     ...overrides,
   };
 }
@@ -90,6 +94,35 @@ describe('GET /api/queries/active', () => {
       lastScrapeStatus: null,
       lastScrapeError: null,
       lastScrapedAt: null,
+    });
+  });
+
+  // ticket-tracker-r06: the tracker list needs passenger counts to render a
+  // compact summary on multi-pax cards.
+  it('surfaces adults/children/infantsInSeat/infantsOnLap for a multi-pax tracker', async () => {
+    mockFindMany.mockResolvedValue([
+      shapedRow({ adults: 3, children: 2, infantsInSeat: 0, infantsOnLap: 0 }),
+    ]);
+    const res = await GET();
+    const data = await res.json();
+    // Negative control: children must surface as children, not folded into adults.
+    expect(data.data.queries[0]).toMatchObject({
+      adults: 3,
+      children: 2,
+      infantsInSeat: 0,
+      infantsOnLap: 0,
+    });
+  });
+
+  it('defaults passenger fields to the single-adult shape when absent from the row', async () => {
+    mockFindMany.mockResolvedValue([shapedRow()]);
+    const res = await GET();
+    const data = await res.json();
+    expect(data.data.queries[0]).toMatchObject({
+      adults: 1,
+      children: 0,
+      infantsInSeat: 0,
+      infantsOnLap: 0,
     });
   });
 });

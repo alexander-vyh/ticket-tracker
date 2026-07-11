@@ -21,6 +21,7 @@ import { aggregateScrapeStatus } from '@/lib/scrape-status';
 import { canManageQueryWithoutToken } from '@/lib/query-auth';
 import { filterSnapshotsByTrackerFilters } from '@/lib/snapshot-filters';
 import { MAX_TRACKER_EDIT_EVENTS } from '@/lib/tracker-edit-events';
+import { passengerSummary } from '@/lib/passenger-summary';
 import { groupDateRange } from './group-date-range';
 import { safeJsonLd } from './safe-json-ld';
 import styles from './page.module.css';
@@ -135,24 +136,6 @@ interface QueryWithSnapshots {
   }>;
   lastRun: { startedAt: Date; status: string; error: string | null } | null;
   globalScrapeInterval: number;
-}
-
-/** "5 travelers · 3 adults, 2 children" — null for the default single adult. */
-function passengerSummary(q: {
-  adults: number;
-  children: number;
-  infantsInSeat: number;
-  infantsOnLap: number;
-}): string | null {
-  const total = q.adults + q.children + q.infantsInSeat + q.infantsOnLap;
-  if (total <= 1) return null;
-  const parts = [
-    `${q.adults} ${q.adults === 1 ? 'adult' : 'adults'}`,
-    q.children > 0 ? `${q.children} ${q.children === 1 ? 'child' : 'children'}` : null,
-    q.infantsInSeat > 0 ? `${q.infantsInSeat} infant${q.infantsInSeat === 1 ? '' : 's'} (seat)` : null,
-    q.infantsOnLap > 0 ? `${q.infantsOnLap} infant${q.infantsOnLap === 1 ? '' : 's'} (lap)` : null,
-  ].filter(Boolean);
-  return `${total} travelers · ${parts.join(', ')}`;
 }
 
 function renderRouteBlock(qData: QueryWithSnapshots, isMultiRoute: boolean) {

@@ -34,6 +34,10 @@ function makePartial(): ParsedFlightQuery {
     cabinClass: 'economy',
     tripType: 'round_trip',
     currency: null,
+    adults: 1,
+    children: 0,
+    infantsInSeat: 0,
+    infantsOnLap: 0,
   };
 }
 
@@ -86,6 +90,11 @@ describe('ClarificationCard', () => {
     expect(history.textContent).not.toMatch(/9-day return window/);
   });
 
+  // oracle: ClarificationCard is a stateless, purely presentational component
+  // whose entire public contract is the onAnswer callback (parent owns and
+  // persists the conversation state). There is no independent store or DOM
+  // side effect to assert here -- the callback invocation with the typed
+  // value IS the component's externally observable behavior.
   it('submits the typed answer when the user clicks submit', async () => {
     const user = userEvent.setup();
     const onAnswer = vi.fn().mockResolvedValue(true);
