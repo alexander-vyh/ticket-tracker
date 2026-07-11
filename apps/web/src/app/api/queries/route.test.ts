@@ -700,3 +700,90 @@ describe('POST /api/queries passenger fields', () => {
     expect(mockQueryCreate).not.toHaveBeenCalled();
   });
 });
+
+describe('POST /api/queries multi-segment itineraries (open-jaw / multi-city)', () => {
+  // oracle: trip-shape derivation mirrors Google's own rules (a non-reversing
+  // 2-leg trip is an open jaw, not a round trip) — the same rules the tfs-builder
+  // encodes and that were browser-verified against Google Flights 2026-07-10.
+  beforeEach(() => {
+    mockQueryCreate.mockClear();
+    mockRedisIncr.mockResolvedValue(1);
+  });
+
+  it('persists an open-jaw itinerary and derives tripType=open_jaw', async () => {
+    const res = await POST(makeRequest({
+      ...validBody,
+      segments: [
+        { from: 'LAX', to: 'AKL', date: '2026-12-18' },
+        { from: 'CHC', to: 'LAX', date: '2027-01-08' },
+      ],
+    }));
+    expect(res.status).toBe(201);
+    expect(mockQueryCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          tripType: 'open_jaw',
+          segments: [
+            { from: 'LAX', to: 'AKL', date: '2026-12-18' },
+            { from: 'CHC', to: 'LAX', date: '2027-01-08' },
+          ],
+        }),
+      }),
+    );
+  });
+
+  it('derives tripType=round_trip when a 2-leg itinerary reverses itself', async () => {
+    const res = await POST(makeRequest({
+      ...validBody,
+      segments: [
+        { from: 'LAX', to: 'AKL', date: '2026-12-18' },
+        { from: 'AKL', to: 'LAX', date: '2027-01-08' },
+      ],
+    }));
+    expect(res.status).toBe(201);
+    expect(mockQueryCreate).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ tripType: 'round_trip' }) }),
+    );
+  });
+
+  it('derives tripType=multi_city for a 3-leg itinerary', async () => {
+    const res = await POST(makeRequest({
+      ...validBody,
+      segments: [
+        { from: 'LAX', to: 'AKL', date: '2026-12-18' },
+        { from: 'AKL', to: 'SYD', date: '2026-12-28' },
+        { from: 'SYD', to: 'LAX', date: '2027-01-08' },
+      ],
+    }));
+    expect(res.status).toBe(201);
+    expect(mockQueryCreate).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ tripType: 'multi_city' }) }),
+    );
+  });
+
+  it('rejects a single-leg segments array (needs >= 2)', async () => {
+    const res = await POST(makeRequest({ ...validBody, segments: [{ from: 'LAX', to: 'AKL', date: '2026-12-18' }] }));
+    expect(res.status).toBe(400);
+    expect(mockQueryCreate).not.toHaveBeenCalled();
+  });
+
+  it('rejects a segment with a bad airport code', async () => {
+    const res = await POST(makeRequest({
+      ...validBody,
+      segments: [
+        { from: 'LAX', to: 'Auckland', date: '2026-12-18' },
+        { from: 'CHC', to: 'LAX', date: '2027-01-08' },
+      ],
+    }));
+    expect(res.status).toBe(400);
+    expect(mockQueryCreate).not.toHaveBeenCalled();
+  });
+
+  it('leaves tripType untouched when no segments are supplied (legacy path)', async () => {
+    const res = await POST(makeRequest(validBody));
+    expect(res.status).toBe(201);
+    const call = mockQueryCreate.mock.calls[0]![0];
+    expect(call.data.segments).toBeUndefined();
+    expect(call.data.tripType).toBe('round_trip');
+  });
+});

@@ -24,7 +24,8 @@ model Query {
   preferredAggregators String[] @default([]) // per-query override of User.preferredAggregators; empty = inherit
   timePreference  String   @default("any")
   cabinClass      String   @default("economy")
-  tripType        String   @default("round_trip") // 'one_way' | 'round_trip'
+  tripType        String   @default("round_trip") // 'one_way' | 'round_trip' | 'open_jaw' | 'multi_city'
+  segments        Json?    // ordered [{from,to,date}] for open_jaw/multi_city; null = single-pair itinerary described by origin/destination/dateFrom/dateTo
   adults          Int      @default(1)
   children        Int      @default(0) // aged 2-11 per Google Flights
   infantsInSeat   Int      @default(0)

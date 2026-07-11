@@ -12,6 +12,56 @@ import { isValidPriceAmount } from '@/lib/limits';
 
 class PaxValidationError extends Error {}
 
+/**
+ * Validate and normalize an optional multi-segment itinerary and derive its
+ * trip shape. Mirrors the tfs-builder's rules so an itinerary that persists
+ * here is one the data plane can actually encode:
+ *   - 2 legs whose return reverses the outbound  → round_trip
+ *   - 2 legs whose return does NOT reverse it     → open_jaw
+ *   - 3+ legs                                     → multi_city
+ * Throws PaxValidationError (→ 400) on any malformed input.
+ */
+function parseSegments(
+  raw: unknown,
+): { segments: Array<{ from: string; to: string; date: string }>; tripType: string } {
+  if (!Array.isArray(raw) || raw.length < 2) {
+    throw new PaxValidationError('segments must be an array of at least 2 legs');
+  }
+  if (raw.length > 6) {
+    throw new PaxValidationError('segments supports at most 6 legs');
+  }
+  const iata = /^[A-Za-z]{3}$/;
+  const isoDate = /^\d{4}-\d{2}-\d{2}$/;
+  const segments = raw.map((leg, i): { from: string; to: string; date: string } => {
+    if (typeof leg !== 'object' || leg === null) {
+      throw new PaxValidationError(`segment ${i} must be an object with from/to/date`);
+    }
+    const { from, to, date } = leg as Record<string, unknown>;
+    if (typeof from !== 'string' || !iata.test(from)) {
+      throw new PaxValidationError(`segment ${i}: 'from' must be a 3-letter airport code`);
+    }
+    if (typeof to !== 'string' || !iata.test(to)) {
+      throw new PaxValidationError(`segment ${i}: 'to' must be a 3-letter airport code`);
+    }
+    if (typeof date !== 'string' || !isoDate.test(date)) {
+      throw new PaxValidationError(`segment ${i}: 'date' must be YYYY-MM-DD`);
+    }
+    if (from.toUpperCase() === to.toUpperCase()) {
+      throw new PaxValidationError(`segment ${i}: 'from' and 'to' must differ`);
+    }
+    return { from: from.toUpperCase(), to: to.toUpperCase(), date };
+  });
+  let tripType: string;
+  if (segments.length === 2) {
+    const [out, ret] = segments;
+    const reverses = out!.from === ret!.to && out!.to === ret!.from;
+    tripType = reverses ? 'round_trip' : 'open_jaw';
+  } else {
+    tripType = 'multi_city';
+  }
+  return { segments, tripType };
+}
+
 const MAX_ROUTES = 20;
 const MAX_FLIGHTS_PER_ROUTE = 50;
 
@@ -124,6 +174,7 @@ export async function POST(request: NextRequest) {
     children: bodyChildren,
     infantsInSeat: bodyInfantsInSeat,
     infantsOnLap: bodyInfantsOnLap,
+    segments: bodySegments,
   } = body;
 
   // Validate rawInput length
@@ -158,6 +209,20 @@ export async function POST(request: NextRequest) {
   }
   if (infantsOnLap > adults) {
     return apiError('Each infant on lap requires an adult', 400);
+  }
+
+  // Optional multi-segment itinerary (open-jaw / multi-city). When present it is
+  // the source of truth for the trip shape; absent = a single-pair itinerary
+  // described by origin/destination/dateFrom/dateTo (unchanged legacy behavior).
+  let segments: Array<{ from: string; to: string; date: string }> | null = null;
+  let itineraryTripType: string | null = null;
+  if (bodySegments !== undefined && bodySegments !== null) {
+    try {
+      ({ segments, tripType: itineraryTripType } = parseSegments(bodySegments));
+    } catch (err) {
+      if (err instanceof PaxValidationError) return apiError(err.message, 400);
+      throw err;
+    }
   }
 
 
@@ -385,7 +450,9 @@ export async function POST(request: NextRequest) {
         label,
         timePreference: timePreference || 'any',
         cabinClass: cabinClass || 'economy',
-        tripType: tripType === 'one_way' ? 'one_way' : 'round_trip',
+        tripType: itineraryTripType
+          ?? (tripType === 'one_way' ? 'one_way' : 'round_trip'),
+        segments: segments ?? undefined,
         adults,
         children,
         infantsInSeat,
