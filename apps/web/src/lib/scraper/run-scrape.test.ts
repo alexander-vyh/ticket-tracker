@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { readFileSync } from 'fs';
 import { resolve } from 'path';
 
-const { mockPrisma, mockNavigateGoogleFlights, mockNavigateAirlineDirect, mockNavigateSkyscanner, mockNavigateKayak, mockExtractPrices, mockIsKnownAirline } = vi.hoisted(() => {
+const { mockPrisma, mockNavigateGoogleFlights, mockNavigateGoogleFlightsUrl, mockNavigateAirlineDirect, mockNavigateSkyscanner, mockNavigateKayak, mockExtractPrices, mockIsKnownAirline, mockFetchSsr } = vi.hoisted(() => {
   const mockPrisma = {
     query: { findUnique: vi.fn() },
     fetchRun: { create: vi.fn(), update: vi.fn() },
@@ -11,18 +11,21 @@ const { mockPrisma, mockNavigateGoogleFlights, mockNavigateAirlineDirect, mockNa
     apiUsageLog: { create: vi.fn() },
   };
   const mockNavigateGoogleFlights = vi.fn();
+  const mockNavigateGoogleFlightsUrl = vi.fn();
   const mockNavigateAirlineDirect = vi.fn();
   const mockNavigateSkyscanner = vi.fn();
   const mockNavigateKayak = vi.fn();
   const mockExtractPrices = vi.fn();
   const mockIsKnownAirline = vi.fn();
-  return { mockPrisma, mockNavigateGoogleFlights, mockNavigateAirlineDirect, mockNavigateSkyscanner, mockNavigateKayak, mockExtractPrices, mockIsKnownAirline };
+  const mockFetchSsr = vi.fn();
+  return { mockPrisma, mockNavigateGoogleFlights, mockNavigateGoogleFlightsUrl, mockNavigateAirlineDirect, mockNavigateSkyscanner, mockNavigateKayak, mockExtractPrices, mockIsKnownAirline, mockFetchSsr };
 });
 
 vi.mock('@/lib/prisma', () => ({ prisma: mockPrisma }));
 
 vi.mock('./navigate', () => ({
   navigateGoogleFlights: (...args: unknown[]) => mockNavigateGoogleFlights(...args),
+  navigateGoogleFlightsUrl: (...args: unknown[]) => mockNavigateGoogleFlightsUrl(...args),
   navigateAirlineDirect: (...args: unknown[]) => mockNavigateAirlineDirect(...args),
   navigateSkyscanner: (...args: unknown[]) => mockNavigateSkyscanner(...args),
   navigateKayak: (...args: unknown[]) => mockNavigateKayak(...args),
@@ -31,6 +34,19 @@ vi.mock('./navigate', () => ({
 vi.mock('./extract-prices', () => ({
   extractPrices: (...args: unknown[]) => mockExtractPrices(...args),
 }));
+
+vi.mock('../dataplane/ssr-fetch', () => ({
+  fetchSsr: (...args: unknown[]) => mockFetchSsr(...args),
+}));
+
+// Two-tier data plane defaults for the whole file (ticket-tracker-uwj): the
+// tfs-first browser attempt reports no results, and SSR defers -- both fall
+// straight through to the pre-existing legacy navigateGoogleFlights mock, so
+// every pre-existing test's behavior is byte-for-byte unchanged. vi.clearAllMocks()
+// (used throughout this file) clears call history but not implementations, so
+// this default holds file-wide unless a specific test overrides it.
+mockNavigateGoogleFlightsUrl.mockResolvedValue({ html: '', url: '', resultsFound: false, source: 'google_flights' });
+mockFetchSsr.mockResolvedValue({ status: 'deferred' });
 
 vi.mock('./ai-registry', () => ({
   getModelCosts: vi.fn().mockReturnValue({ costPer1kInput: 0, costPer1kOutput: 0 }),

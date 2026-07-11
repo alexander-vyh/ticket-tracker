@@ -42,6 +42,12 @@ export interface FlightSearchParams {
   tripType?: string; // 'one_way' | 'round_trip'
   currency?: string | null; // ISO 4217 code. null = omit (Google auto-detects)
   country?: string | null; // ISO 3166-1 alpha-2. null = omit (Google auto-detects)
+  // Optional passenger breakdown (design.md R1). Undefined fields default to
+  // a single adult everywhere they are consumed, matching pre-R1 behavior.
+  adults?: number;
+  children?: number;
+  infantsInSeat?: number;
+  infantsOnLap?: number;
 }
 
 export type NavigationSource = 'google_flights' | 'airline_direct' | 'skyscanner' | 'kayak';
@@ -324,10 +330,10 @@ export function pageHasRequestedRoute(
  * parameter and redirects to the bare /travel/flights homepage. The input
  * URL has a q param; the resolved URL does not.
  */
-export function pageRedirectedToHomepage(inputUrl: string, finalUrl: string): boolean {
+export function pageRedirectedToHomepage(inputUrl: string, finalUrl: string, paramName: string = 'q'): boolean {
   try {
-    const had = new URL(inputUrl).searchParams.has('q');
-    const has = new URL(finalUrl).searchParams.has('q');
+    const had = new URL(inputUrl).searchParams.has(paramName);
+    const has = new URL(finalUrl).searchParams.has(paramName);
     return had && !has;
   } catch {
     return false;
@@ -449,6 +455,86 @@ export async function navigateGoogleFlights(
 
   // Unreachable — loop always returns — but TypeScript needs it
   throw new Error('navigateGoogleFlights: exhausted all attempts');
+}
+
+/**
+ * Single-attempt navigation to an exact, pre-built URL (the tfs protobuf URL
+ * from the two-tier data plane — see apps/web/src/lib/dataplane/tfs-builder.ts).
+ * No candidate rotation: unlike the NL-phrase URLs in navigateGoogleFlights,
+ * a tfs URL is a canonical, unambiguous encoding of the query, so there is
+ * no misparse risk to hedge against with alternate phrasings.
+ *
+ * Reuses navigateGoogleFlights's anti-corruption defenses (homepage-redirect
+ * detection, directional-route text check) so a redirected/corrupted tfs
+ * fetch fails the same way a corrupted NL fetch does, rather than silently
+ * reporting no results as a false success. The redirect check is keyed on
+ * the `tfs` query param (not `q`), since that's what this URL carries.
+ */
+export async function navigateGoogleFlightsUrl(
+  url: string,
+  params: FlightSearchParams,
+  countryProfile?: CountryProfile,
+  proxyUrl?: string,
+): Promise<NavigationResult> {
+  const browser = await launchBrowser({ proxyUrl });
+  const attemptStart = Date.now();
+
+  try {
+    const context = await createStealthContext(browser, { countryProfile, proxyUrl });
+    const page = await context.newPage();
+    console.log(`[navigate] tfs attempt → ${url}`);
+
+    const gotoStart = Date.now();
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+    console.log(`[navigate] tfs goto resolved in ${Date.now() - gotoStart}ms`);
+
+    await randomDelay(2000, 4000);
+
+    try {
+      const consentButton = page.locator('button:has-text("Accept all")').first();
+      if (await consentButton.isVisible({ timeout: 2000 })) {
+        await consentButton.click();
+        await randomDelay(2000, 4000);
+      }
+    } catch {
+      // No consent dialog — continue
+    }
+
+    let resultsFound = false;
+    try {
+      await page.waitForSelector('[data-gs]', { timeout: 15_000 });
+      resultsFound = true;
+    } catch {
+      console.log(`[navigate] tfs: selector [data-gs] not found after 15s`);
+    }
+
+    if (resultsFound) {
+      await simulateHumanBehavior(page);
+    }
+
+    const html = await page.evaluate(() => document.body.innerText);
+    const finalUrl = page.url();
+
+    if (resultsFound && pageRedirectedToHomepage(url, finalUrl, 'tfs')) {
+      console.log(`[navigate] tfs param dropped on redirect (input=${url}, final=${finalUrl}) — treating as failed`);
+      resultsFound = false;
+    }
+    if (resultsFound && !pageHasRequestedRoute(html, params.origin, params.destination, params.currency)) {
+      console.log(`[navigate] tfs page text missing requested directional route (origin=${params.origin}, dest=${params.destination}, finalUrl=${finalUrl}) — treating as failed`);
+      resultsFound = false;
+    }
+
+    console.log(`[navigate] tfs: resultsFound=${resultsFound}, textLength=${html.length}, finalUrl=${finalUrl}, elapsed=${Date.now() - attemptStart}ms`);
+
+    await context.close();
+    return { html, url, resultsFound, source: 'google_flights' };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`[navigate] tfs attempt failed (elapsed=${Date.now() - attemptStart}ms): ${message}`);
+    throw error;
+  } finally {
+    await browser.close().catch(() => {});
+  }
 }
 
 export interface FlightDetailResult {

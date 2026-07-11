@@ -1,7 +1,6 @@
 import { mkdir, writeFile } from 'fs/promises';
 import { prisma } from '@/lib/prisma';
 import {
-  navigateGoogleFlights,
   navigateAirlineDirect,
   navigateSkyscanner,
   navigateKayak,
@@ -14,6 +13,8 @@ import { isKnownAirline } from './airline-urls';
 import { getCountryProfile } from './country-profiles';
 import { createVpnProvider, type VpnProviderType } from './vpn';
 import { expandQueryDates } from './scrape-dates';
+import { runTwoTierGoogleFlights, type PassengerCounts } from './dataplane-integration';
+import type { Availability, Tier } from '../dataplane/orchestrator';
 
 const RETRYABLE_FAILURES: ExtractionFailureReason[] = [
   'empty_extraction',
@@ -37,6 +38,15 @@ const MAX_EXTRACT_ATTEMPTS = 2;
 const DEBUG_DIR = '/tmp/flight-finder-debug';
 const VPN_INTER_COUNTRY_DELAY_MS = 12000;
 const DEFAULT_AGGREGATORS_ENABLED: NavigationSource[] = ['google_flights', 'airline_direct'];
+// Per-run cap on browser-tier requests consumed by the two-tier data plane
+// (ticket-tracker-uwj). A canary check burns a request too, so this bounds
+// total browser-driven fetches for one runScrapeForQuery call, keeping a
+// single run well under the ~30-request/IP soft-throttle window measured
+// 2026-07-10. Reset at the top of runScrapeForQuery; not safe against
+// concurrent runScrapeForQuery calls in the same process (acceptable for the
+// current cron path, which awaits queries sequentially — see runScrapeAllInner).
+const BROWSER_BUDGET_PER_RUN = 10;
+let browserBudgetUsedThisRun = 0;
 
 /**
  * Resolve the ordered aggregator fallback chain for a single query.
@@ -111,6 +121,12 @@ interface PairScrapeResult {
   outputTokens: number;
   sources: Set<string>;
   lastFailureReason: string | undefined;
+  // Set only when the google_flights step ran through the two-tier data
+  // plane (ticket-tracker-uwj). Undefined for pairs handled entirely by the
+  // legacy airline_direct/skyscanner/kayak chain.
+  availability?: Availability;
+  tier?: Tier;
+  canaryOk?: boolean | null;
 }
 
 /**
@@ -143,6 +159,7 @@ async function scrapeOneDatePair(
   countryProfile: ReturnType<typeof getCountryProfile> | undefined,
   proxyUrl: string | undefined,
   vpnCountry: string | null,
+  passengers: PassengerCounts,
 ): Promise<PairScrapeResult> {
   const effectiveCurrency = pairParams.currency ?? null;
   const travelDateFallback = pairParams.dateFrom.toISOString().split('T')[0]!;
@@ -152,6 +169,9 @@ async function scrapeOneDatePair(
   let inputTokens = 0;
   let outputTokens = 0;
   let lastFailureReason: string | undefined;
+  let availability: Availability | undefined;
+  let tier: Tier | undefined;
+  let canaryOk: boolean | null | undefined;
 
   async function extractFromNav(nav: NavigationResult, attempt: number): Promise<void> {
     sources.add(nav.source);
@@ -164,6 +184,41 @@ async function scrapeOneDatePair(
     if (result.failureReason) {
       lastFailureReason = result.failureReason;
       await saveDebugHtml(queryId, nav.html, attempt);
+    } else {
+      lastFailureReason = undefined;
+    }
+  }
+
+  // google_flights runs through the two-tier data plane (ticket-tracker-uwj):
+  // SSR first (skipped for children/infants queries), tfs-driven browser
+  // second, SSR canary only to disambiguate an empty browser result. Handled
+  // outside the shared switch/extractFromNav path below because the
+  // orchestrator already performs its own extraction internally — routing it
+  // through extractFromNav too would double the (paid) LLM extraction call.
+  async function runGoogleFlightsStep(attempt: number): Promise<void> {
+    const remainingBudget = Math.max(0, BROWSER_BUDGET_PER_RUN - browserBudgetUsedThisRun);
+    const orchestrated = await runTwoTierGoogleFlights({
+      passengers,
+      pairParams,
+      filters,
+      countryProfile,
+      proxyUrl,
+      travelDateFallback,
+      browserBudget: remainingBudget,
+    });
+    browserBudgetUsedThisRun += orchestrated.browserRequestsUsed;
+    sources.add('google_flights');
+    prices = prices.concat(orchestrated.prices);
+    inputTokens += orchestrated.usage.inputTokens;
+    outputTokens += orchestrated.usage.outputTokens;
+    availability = orchestrated.availability;
+    tier = orchestrated.tier;
+    canaryOk = orchestrated.canaryOk;
+    if (orchestrated.failureReason) {
+      lastFailureReason = orchestrated.failureReason;
+      if (orchestrated.lastHtml) {
+        await saveDebugHtml(queryId, orchestrated.lastHtml, attempt);
+      }
     } else {
       lastFailureReason = undefined;
     }
@@ -212,12 +267,21 @@ async function scrapeOneDatePair(
       }
       for (const source of aggregatorChain) {
         if (prices.length > 0) break;
+
+        if (source === 'google_flights') {
+          try {
+            await runGoogleFlightsStep(attempt);
+          } catch (err) {
+            console.error(`[scrape] query=${queryId} pair=${travelDateFallback} aggregator=${source} threw err=${err instanceof Error ? err.message : err}`);
+            continue;
+          }
+          if (lastFailureReason === 'all_filtered_out') break;
+          continue;
+        }
+
         let nav: NavigationResult;
         try {
           switch (source) {
-            case 'google_flights':
-              nav = await navigateGoogleFlights(pairParams, countryProfile, proxyUrl);
-              break;
             case 'skyscanner':
               nav = await navigateSkyscanner(pairParams, countryProfile, proxyUrl);
               break;
@@ -232,12 +296,27 @@ async function scrapeOneDatePair(
           continue;
         }
         await extractFromNav(nav, attempt);
+        if (prices.length > 0 && availability !== undefined) {
+          // A later chain source rescued the pair after google_flights' own
+          // no_options/throttled determination. That determination described
+          // only the (failed) google_flights attempt, not the pair's actual
+          // outcome — the pair DID find prices, just via a different source —
+          // so it must not be reported as the pair's availability.
+          availability = undefined;
+          tier = undefined;
+          canaryOk = undefined;
+        }
         // all_filtered_out short-circuits — real flights existed, filters excluded them
         if (lastFailureReason === 'all_filtered_out') break;
       }
     }
 
     if (prices.length > 0) break;
+
+    // A confirmed no_options result is a successful observation, not a
+    // failure — stop retrying immediately rather than burning another
+    // browser-budget round on a route we already have a canary-verified answer for.
+    if (availability === 'no_options') break;
 
     if (attempt < MAX_EXTRACT_ATTEMPTS && lastFailureReason && RETRYABLE_FAILURES.includes(lastFailureReason as ExtractionFailureReason)) {
       const delay = 5000 + Math.random() * 5000;
@@ -246,7 +325,7 @@ async function scrapeOneDatePair(
     }
   }
 
-  return { prices, inputTokens, outputTokens, sources, lastFailureReason };
+  return { prices, inputTokens, outputTokens, sources, lastFailureReason, availability, tier, canaryOk };
 }
 
 /** Scrape a single query for a single country pass (local or VPN). */
@@ -264,6 +343,12 @@ async function scrapeQueryForCountry(
     cabinClass: string;
     flexibility: number;
     user: { preferredAggregators: string[] } | null;
+    // Passenger breakdown (design.md R1). Undefined on legacy fixtures/callers
+    // defaults to a single adult, matching pre-R1 implicit behavior.
+    adults?: number;
+    children?: number;
+    infantsInSeat?: number;
+    infantsOnLap?: number;
   },
   searchParams: import('./navigate').FlightSearchParams,
   config: { provider?: string; model?: string; aggregatorsEnabled?: string[] } | null,
@@ -296,6 +381,13 @@ async function scrapeQueryForCountry(
   const model = config?.model ?? 'claude-haiku-4-5-20251001';
   const costs = getModelCosts(provider, model);
 
+  const passengers: PassengerCounts = {
+    adults: query.adults ?? 1,
+    children: query.children ?? 0,
+    infantsInSeat: query.infantsInSeat ?? 0,
+    infantsOnLap: query.infantsOnLap ?? 0,
+  };
+
   // Expand the date window into per-pair scrapes. One-way iterates every day
   // in [dateFrom, dateTo] capped at 7. Round-trip emits a single (dateFrom,
   // dateTo) pair regardless of flexibility; iterating multiple pairs would
@@ -312,12 +404,20 @@ async function scrapeQueryForCountry(
   );
   console.log(`[scrape] query=${queryId} expanded into ${pairs.length} date pair(s)`);
 
-  let allPrices: import('./extract-prices').PriceData[] = [];
+  type PriceDataWithTier = import('./extract-prices').PriceData & { sourceTier?: 'ssr' | 'browser_llm' };
+  let allPrices: PriceDataWithTier[] = [];
   let totalInputTokens = 0;
   let totalOutputTokens = 0;
   let lastFailureReason: string | undefined;
   const sources = new Set<string>();
   const scrapedTravelDates = new Set<string>();
+  // Two-tier data plane provenance (ticket-tracker-uwj). Only set on pairs
+  // whose google_flights step ran through the orchestrator; last-pair-wins
+  // for a multi-pair one-way grid, which is an accepted v1 limitation —
+  // per-pair grid availability is deferred to ticket-tracker-izy.
+  let latestAvailability: Availability | undefined;
+  let latestTier: Tier | undefined;
+  let latestCanaryOk: boolean | null | undefined;
 
   for (const pair of pairs) {
     const pairTravelDate = pair.outbound.toISOString().slice(0, 10);
@@ -332,7 +432,7 @@ async function scrapeQueryForCountry(
     let pairResult: PairScrapeResult;
     try {
       pairResult = await scrapeOneDatePair(
-        queryId, pairParams, filters, directAirlines, useAirlineDirect, aggregatorChain, countryProfile, proxyUrl, vpnCountry,
+        queryId, pairParams, filters, directAirlines, useAirlineDirect, aggregatorChain, countryProfile, proxyUrl, vpnCountry, passengers,
       );
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -341,12 +441,21 @@ async function scrapeQueryForCountry(
       continue;
     }
 
-    allPrices = allPrices.concat(pairResult.prices);
+    const pairSourceTier: 'ssr' | 'browser_llm' | undefined =
+      pairResult.tier === undefined ? undefined : pairResult.tier === 'ssr' ? 'ssr' : 'browser_llm';
+    allPrices = allPrices.concat(
+      pairSourceTier ? pairResult.prices.map((p) => ({ ...p, sourceTier: pairSourceTier })) : pairResult.prices,
+    );
     totalInputTokens += pairResult.inputTokens;
     totalOutputTokens += pairResult.outputTokens;
     for (const s of pairResult.sources) sources.add(s);
     if (pairResult.lastFailureReason) {
       lastFailureReason = pairResult.lastFailureReason;
+    }
+    if (pairResult.availability !== undefined) {
+      latestAvailability = pairResult.availability;
+      latestTier = pairResult.tier;
+      latestCanaryOk = pairResult.canaryOk;
     }
     // Only mark this travelDate as authoritatively scraped if the pair
     // produced prices. Without this gate, a pair that hit page_not_loaded
@@ -389,7 +498,7 @@ async function scrapeQueryForCountry(
   // minute do not collide. flightIdLegacy carries the time-only form for
   // matching against rows persisted before this rollout (kept in memory only,
   // never written to the DB).
-  const withFlightIds = allPrices.map((p) => {
+  const withFlightIdsRaw = allPrices.map((p) => {
     const timePart = (p.departureTime ?? '').replace(/[^0-9]/g, '') || '0000';
     const airlinePart = p.airline.replace(/[^a-zA-Z0-9]/g, '').substring(0, 20);
     const flightNumberPart = (p.flightNumber ?? '').replace(/\s+/g, '').toUpperCase();
@@ -398,6 +507,14 @@ async function scrapeQueryForCountry(
     const flightIdLegacy = `${airlinePart}-${timePart}-${query.origin}-${query.destination}-${p.travelDate}`;
     return { ...p, flightId, flightIdLegacy };
   });
+
+  // A confirmed no_options or throttled result must never persist snapshot
+  // rows — no_options because there is nothing to snapshot by construction
+  // (orchestrateScrape only returns flights on 'available'), throttled
+  // because it is a soft-block, not a market observation, and must not
+  // contaminate price history. Defensive guard, not just reliance on
+  // allPrices already being empty in both cases.
+  const withFlightIds = latestAvailability === 'no_options' || latestAvailability === 'throttled' ? [] : withFlightIdsRaw;
 
   // Sold-out detection: scope by BOTH queryId AND vpnCountry to avoid cross-country false positives
   const previousSnapshots = await prisma.priceSnapshot.findMany({
@@ -464,6 +581,7 @@ async function scrapeQueryForCountry(
         flightId: p.flightId,
         flightNumber: p.flightNumber ?? null,
         seatsLeft: p.seatsLeft ?? null,
+        sourceTier: p.sourceTier ?? 'browser_llm',
         vpnCountry,
         fetchRunId,
       })),
@@ -476,8 +594,9 @@ async function scrapeQueryForCountry(
     });
   }
 
-  console.log(`[scrape] query=${queryId} vpn=${vpnCountry ?? 'local'} finished — ${allPrices.length} prices, cost=$${extractionCost.toFixed(4)}`);
-  const failureReason = allPrices.length === 0 ? lastFailureReason : undefined;
+  const snapshotsCount = withFlightIds.length;
+  console.log(`[scrape] query=${queryId} vpn=${vpnCountry ?? 'local'} finished — ${snapshotsCount} prices, cost=$${extractionCost.toFixed(4)}`);
+  const failureReason = snapshotsCount === 0 ? lastFailureReason : undefined;
   const failureMessages: Record<string, string> = {
     page_not_loaded: 'Page did not load results — blocked, CAPTCHA, or timeout.',
     no_json_in_response: 'LLM response contained no parseable JSON array. Page HTML may be a consent wall, error page, or empty shell.',
@@ -486,26 +605,46 @@ async function scrapeQueryForCountry(
     llm_error: 'LLM call failed (timeout, rate limit, or provider error). The provider may be temporarily unavailable.',
     json_parse_error: 'LLM returned invalid JSON. Provider output was malformed or truncated.',
   };
-  const errorMsg = failureReason ? failureMessages[failureReason] : undefined;
+
+  // no_options is a confirmed, successful observation (R3) — not an error, and
+  // must not be reported through the generic failure-reason messages. throttled
+  // is the opposite of a confirmed answer (soft-blocked, canary also empty) and
+  // gets its own message rather than borrowing an ExtractionFailureReason label
+  // that doesn't describe what actually happened.
+  let status: 'success' | 'partial' | 'failed';
+  let errorMsg: string | undefined;
+  if (latestAvailability === 'no_options') {
+    status = 'success';
+    errorMsg = undefined;
+  } else if (latestAvailability === 'throttled') {
+    status = 'failed';
+    errorMsg = 'Two-tier data plane throttled: browser tier and canary both returned empty — soft-blocked, not confirmed no-availability.';
+  } else {
+    status = snapshotsCount > 0 ? 'success' : 'failed';
+    errorMsg = failureReason ? failureMessages[failureReason] : undefined;
+  }
 
   const sourceLabel = sources.size === 1 ? [...sources][0]! : [...sources].join('+');
 
   await prisma.fetchRun.update({
     where: { id: fetchRunId },
     data: {
-      status: allPrices.length > 0 ? 'success' : 'failed',
+      status,
       source: sourceLabel,
-      snapshotsCount: allPrices.length,
+      snapshotsCount,
       extractionCost,
       error: errorMsg,
       completedAt: new Date(),
+      ...(latestTier !== undefined ? { tier: latestTier } : {}),
+      ...(latestAvailability !== undefined ? { availability: latestAvailability } : {}),
+      ...(latestCanaryOk !== undefined ? { canaryOk: latestCanaryOk } : {}),
     },
   });
 
   return {
     queryId,
-    status: allPrices.length > 0 ? 'success' : 'failed',
-    snapshotsCount: allPrices.length,
+    status,
+    snapshotsCount,
     extractionCost,
     error: errorMsg,
   };
@@ -518,6 +657,10 @@ export async function runScrapeForQuery(
   proxyUrl?: string,
   opts?: { fetchRunId?: string },
 ): Promise<ScrapeResult> {
+  // Reset the two-tier data plane's per-run browser budget (ticket-tracker-uwj).
+  // See BROWSER_BUDGET_PER_RUN's comment for the concurrency caveat.
+  browserBudgetUsedThisRun = 0;
+
   const query = await prisma.query.findUnique({
     where: { id: queryId },
     include: { user: { select: { preferredAggregators: true } } },
