@@ -7,18 +7,28 @@
  *  - Tier 1 (SSR, cheap, throttle-resilient) can price adults-only queries but
  *    Google defers EVERY children>0 query out of the SSR payload. So a query
  *    with any children skips tier 1 and goes straight to tier 2.
- *  - Tier 2 (headless browser + LLM) can price anything but Google soft-blocks
- *    a browser fingerprint after a modest number of requests, serving clean
- *    "No results" pages that are BYTE-IDENTICAL to genuine no-availability.
- *    Therefore an empty browser result can only be trusted as `no_options`
- *    when a same-run CANARY (a known-inventory adults-only query) still returns
- *    flights. If the canary is also empty, we are throttled, not sold out —
- *    recording `no_options` there would poison the price/availability history.
+ *  - Tier 2 (headless browser + LLM) can price anything, but Google serves clean
+ *    "No results" pages that are BYTE-IDENTICAL to genuine no-availability —
+ *    both when soft-blocking a browser fingerprint AND, as of 2026-07-11, on
+ *    every date for any party of >= 4 passengers (a fabricated party-size gate;
+ *    see no-options-guard.ts for the evidence). An empty tier-2 page is
+ *    therefore an observation about a WEB PAGE, never on its own a claim about
+ *    the market.
+ *  - Consequently `no_options` is minted here in exactly ONE place, and only
+ *    against a `confirmed` EmptyResultVerdict from no-options-guard.ts. Anything
+ *    less — no canary, a canary at the wrong party size, an empty canary, or a
+ *    smaller party finding flights the full party could not — is `throttled`.
  *  - Tier 2 has a hard per-run request budget; when exhausted the query is
  *    reported `throttled`, never `no_options`.
  */
 import type { DataplaneFlight, SsrParseResult } from './types';
 import type { TfsQuery } from './tfs-builder';
+import {
+  judgeEmptyResult,
+  needsMonotonicityProbe,
+  type EmptyResultVerdict,
+  type PartyProbe,
+} from './no-options-guard';
 
 export type BrowserFetchResult =
   | { status: 'ok'; flights: DataplaneFlight[] }
@@ -30,11 +40,24 @@ export interface OrchestratorDeps {
   /** Tier 2: headless browser navigation + LLM extraction. */
   fetchBrowser: (query: TfsQuery) => Promise<BrowserFetchResult>;
   /**
-   * Canary: does a known-inventory adults-only variant of this route still
-   * return flights through the browser tier right now? Only consulted to
-   * disambiguate an empty browser result. Consumes one browser request.
+   * CANARY. Runs a KNOWN-GOOD reference cell through the SAME TIER and at the
+   * SAME PARTY SIZE as the query it must vouch for, and reports back the party
+   * and cell it actually ran (see PartyProbe) so the guard can VERIFY the match.
+   *
+   * The party-matching is the entire point and is not negotiable: Google gates
+   * parties of >= 4 with a fabricated empty page, so a 1-adult canary is green
+   * all night and would certify every fabricated 5-passenger zero as a real
+   * sold-out. Consumes one browser request.
    */
-  canaryHasInventory?: (query: TfsQuery) => Promise<boolean>;
+  probeCanary?: (query: TfsQuery) => Promise<PartyProbe>;
+  /**
+   * MONOTONICITY PROBE. Re-runs the query's OWN cell at a strictly smaller
+   * party. If the smaller party finds flights where the full party found none,
+   * the full-party zero has not earned the name `no_options`. Consumes one
+   * browser request; only fired for parties >= 2 that came back empty — i.e.
+   * only when we are about to make a market claim.
+   */
+  probeMonotonicity?: (query: TfsQuery) => Promise<PartyProbe>;
 }
 
 export interface OrchestratorOptions {
@@ -115,30 +138,45 @@ export async function orchestrateScrape(
     return { flights: browser.flights, availability: 'available', tier, browserRequestsUsed: browserUsed };
   }
 
-  // Empty (or errored) browser result — cannot be trusted without the canary.
-  const canaryAvailable = deps.canaryHasInventory && opts.browserBudget - browserUsed > 0;
-  if (!canaryAvailable) {
-    return {
-      flights: [],
-      availability: 'throttled',
-      tier,
-      browserRequestsUsed: browserUsed,
-      note: 'empty browser result, no canary budget to disambiguate',
-    };
+  // Empty (or errored) browser result. An empty PAGE is not an empty MARKET, and
+  // everything below exists to keep those two apart. Each probe is attempted only
+  // if budget remains; a probe we could not afford stays `null`, and a `null`
+  // probe can only ever produce an `unverified` verdict — budget starvation
+  // therefore fails closed, never into a fabricated sold-out.
+  let canary: PartyProbe | null = null;
+  let monotonicity: PartyProbe | null = null;
+
+  if (deps.probeCanary && opts.browserBudget - browserUsed > 0) {
+    canary = await deps.probeCanary(query);
+    browserUsed += 1;
   }
 
-  const inventoryVisible = await deps.canaryHasInventory!(query);
-  browserUsed += 1;
+  // Only spend the second request when we are actually about to make a market
+  // claim: the canary has to have passed, and there has to be a smaller party to
+  // probe. A party of 1 has none, so the canary alone governs it.
+  const canaryPassed = canary?.foundFlights === true;
+  if (
+    canaryPassed &&
+    needsMonotonicityProbe(query) &&
+    deps.probeMonotonicity &&
+    opts.browserBudget - browserUsed > 0
+  ) {
+    monotonicity = await deps.probeMonotonicity(query);
+    browserUsed += 1;
+  }
+
+  const verdict: EmptyResultVerdict = judgeEmptyResult({ query, canary, monotonicity });
 
   return {
     flights: [],
-    // canary sees inventory => our empty result is a genuine no-availability;
-    // canary also empty => we are throttled, NOT sold out.
-    availability: inventoryVisible ? 'no_options' : 'throttled',
+    // THE INVARIANT: `no_options` is reachable from exactly one expression in
+    // this codebase, and only when the guard returns `confirmed`.
+    availability: verdict.kind === 'confirmed' ? 'no_options' : 'throttled',
     tier,
     browserRequestsUsed: browserUsed,
-    note: inventoryVisible
-      ? 'browser empty, canary confirmed inventory visible => genuine no_options'
-      : 'browser empty AND canary empty => soft-blocked, not sold out',
+    note:
+      verdict.kind === 'confirmed'
+        ? `browser empty; party-matched canary (${verdict.partySize} pax, ${verdict.canaryCell}) saw inventory and no smaller party beat it => genuine no_options`
+        : `browser empty and NOT confirmed sold out (${verdict.reason}) => reporting throttled, not no_options`,
   };
 }

@@ -14,6 +14,8 @@ import type { Availability, BrowserFetchResult, Tier } from '../dataplane/orches
 import type { DataplaneFlight } from '../dataplane/types';
 import { navigateGoogleFlights, navigateGoogleFlightsUrl } from './navigate';
 import type { FlightSearchParams } from './navigate';
+import { createMonotonicityProbe, createPartyMatchedCanary } from './canary';
+import type { ProbeDeps } from './canary';
 import { extractPrices } from './extract-prices';
 import type { ExtractionFailureReason, PriceData, QueryFilters } from './extract-prices';
 import type { CountryProfile } from './country-profiles';
@@ -96,23 +98,18 @@ export function pairToTfsQuery(
 }
 
 /**
- * Strips children/infants down to an adults-only variant of the same route+dates.
- * Used to build the canary query: SSR reliably prices adults-only itineraries even
- * when the real (mixed-age) query gets deferred out of SSR — see design.md's
- * riskiest-assumption finding and the uwj review amendment (5 adults SSR-priced
- * $6,448 while the real browser tier was throttled on "No results").
+ * DELETED: adultsOnlyVariant().
+ *
+ * It built the canary query by stripping children off the real query, so a
+ * 3-adult + 2-child family was vouched for by a 3-ADULT probe. Google gates
+ * parties of >= 4 with a fabricated empty page, so that probe passed all night
+ * and certified every fabricated 5-passenger zero as a genuine sold-out — a
+ * guardrail that was present, green, and laundering false negatives.
+ *
+ * The canary now runs at the query's OWN party size, through the browser tier it
+ * is vouching for. See ./canary.ts and ../dataplane/no-options-guard.ts.
+ * (ticket-tracker-45a)
  */
-export function adultsOnlyVariant(query: TfsQuery): TfsQuery {
-  return {
-    ...query,
-    passengers: {
-      adults: Math.max(query.passengers.adults ?? 1, 1),
-      children: 0,
-      infantsInSeat: 0,
-      infantsOnLap: 0,
-    },
-  };
-}
 
 /**
  * Maps an extracted PriceData row into the dataplane's DataplaneFlight shape.
@@ -349,22 +346,6 @@ export function createFetchBrowserAdapter(deps: FetchBrowserAdapterDeps): FetchB
   };
 }
 
-/**
- * Builds the orchestrator's `canaryHasInventory` dependency: a plain SSR fetch
- * (Tier 1, throttle-resilient) on an adults-only variant of the query. Per the
- * uwj review amendment, this is the only trustworthy way to distinguish a
- * genuinely sold-out route from a soft-blocked/throttled browser tier.
- */
-export function createCanaryHasInventory(
-  pairParams: Pick<FlightSearchParams, 'currency'>,
-): (query: TfsQuery) => Promise<boolean> {
-  return async (query: TfsQuery): Promise<boolean> => {
-    const canaryQuery = adultsOnlyVariant(query);
-    const result = await fetchSsr(canaryQuery, { curr: pairParams.currency ?? undefined });
-    return result.status === 'ok' && result.flights.length > 0;
-  };
-}
-
 // Failure reasons that carry no market-availability signal: the canary result
 // is orthogonal to whether the LLM/parser was healthy (llm_error/json_parse_error/
 // no_json_in_response) or whether the user's own filters excluded real flights
@@ -432,14 +413,21 @@ export async function runTwoTierGoogleFlights(deps: TwoTierDeps): Promise<TwoTie
     proxyUrl: deps.proxyUrl,
     travelDateFallback: deps.travelDateFallback,
   });
-  const canary = createCanaryHasInventory(deps.pairParams);
+  const probeDeps: ProbeDeps = {
+    countryProfile: deps.countryProfile,
+    proxyUrl: deps.proxyUrl,
+    currency: deps.pairParams.currency,
+    pairParams: deps.pairParams,
+  };
+  const canary = createPartyMatchedCanary(probeDeps);
 
   let canaryInvoked = false;
   let canaryResult: boolean | null = null;
-  const canaryWrapped = async (query: TfsQuery): Promise<boolean> => {
+  const canaryWrapped = async (query: TfsQuery) => {
     canaryInvoked = true;
-    canaryResult = await canary(query);
-    return canaryResult;
+    const probe = await canary(query);
+    canaryResult = probe.foundFlights;
+    return probe;
   };
 
   const result = await orchestrateScrape(
@@ -447,7 +435,8 @@ export async function runTwoTierGoogleFlights(deps: TwoTierDeps): Promise<TwoTie
     {
       fetchSsr: (q) => fetchSsr(q, { curr: deps.pairParams.currency ?? undefined }),
       fetchBrowser: browserAdapter.fetchBrowser,
-      canaryHasInventory: canaryWrapped,
+      probeCanary: canaryWrapped,
+      probeMonotonicity: createMonotonicityProbe(probeDeps),
     },
     { browserBudget: deps.browserBudget, deepSearch: deps.deepSearch },
   );

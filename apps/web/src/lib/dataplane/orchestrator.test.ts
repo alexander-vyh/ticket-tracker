@@ -1,16 +1,19 @@
 import { describe, expect, it, vi } from 'vitest';
 import { orchestrateScrape, type OrchestratorDeps } from './orchestrator';
+import { cellKeyOf, type PartyProbe } from './no-options-guard';
 import type { TfsQuery } from './tfs-builder';
 import type { DataplaneFlight, SsrParseResult } from './types';
 
-// oracle: the tier-routing, canary, and budget rules encoded here come directly
-// from live measurements on 2026-07-10 (see design doc walking-skeleton section
-// + .research/05-design-review.md): (a) any children>0 query ALWAYS defers out
-// of SSR, so it must skip tier-1 and go straight to browser; (b) a soft-blocked
-// browser returns clean "No results" pages indistinguishable from genuine
-// no-availability, so no_options may ONLY be recorded when a same-run canary
-// (a known-inventory adults-only query) succeeds; (c) the browser tier has a
-// hard per-run budget. These are behavioral requirements, not implementation echoes.
+// oracle: the tier-routing, canary, and budget rules encoded here come from live
+// measurements: (a) any children>0 query ALWAYS defers out of SSR, so it must
+// skip tier-1 and go straight to browser (2026-07-10); (b) Google serves clean
+// "No results" pages indistinguishable from genuine no-availability — both when
+// soft-blocking a browser AND, as of 2026-07-11, on EVERY date for any party of
+// >= 4 (a fabricated party-size gate: 3 adults -> 8 results, 4 pax -> "No
+// options", same tab, same minute). So no_options may ONLY be recorded when a
+// canary AT THE SAME PARTY SIZE still sees inventory and no smaller party beats
+// the target; (c) the browser tier has a hard per-run budget, and running out of
+// it must fail closed. These are behavioral requirements, not implementation echoes.
 
 const RT_ADULTS: TfsQuery = {
   trip: 'round-trip', seat: 'economy',
@@ -72,37 +75,125 @@ describe('orchestrateScrape tier routing', () => {
   });
 });
 
-describe('orchestrateScrape canary guard (the anti-corruption rule)', () => {
-  it('records no_options ONLY when the canary confirms inventory is visible', async () => {
-    // browser returns empty, canary SUCCEEDS => genuine no-availability
+// A canary that faithfully mirrors the guarded query's party, run against a
+// reference cell that is NOT the query's own. This is what a CORRECT canary
+// looks like; the tests below then attack it.
+const REFERENCE_CELL = cellKeyOf({
+  ...RT_ADULTS,
+  segments: [
+    { date: '2026-12-01', fromAirport: 'LAX', toAirport: 'AKL' },
+    { date: '2026-12-22', fromAirport: 'AKL', toAirport: 'LAX' },
+  ],
+});
+const matchedCanary = (foundFlights: boolean) =>
+  vi.fn(async (q: TfsQuery): Promise<PartyProbe> => ({
+    passengers: { ...q.passengers },
+    cellKey: REFERENCE_CELL,
+    foundFlights,
+  }));
+const monotonicityProbe = (foundFlights: boolean) =>
+  vi.fn(async (q: TfsQuery): Promise<PartyProbe> => ({
+    passengers: { adults: 1 },
+    cellKey: cellKeyOf(q),
+    foundFlights,
+  }));
+
+describe('orchestrateScrape no_options guard (the anti-corruption rule)', () => {
+  it('records no_options ONLY when a party-matched canary sees inventory AND no smaller party beats the target', async () => {
     const d = deps({
       fetchBrowser: vi.fn(async () => ({ status: 'ok' as const, flights: [] })),
-      canaryHasInventory: vi.fn(async () => true),
+      probeCanary: matchedCanary(true),
+      probeMonotonicity: monotonicityProbe(false),
     });
     const r = await orchestrateScrape(RT_FAMILY, d, { browserBudget: 5 });
     expect(r.availability).toBe('no_options');
     expect(r.flights).toHaveLength(0);
   });
 
-  it('records THROTTLED (not no_options) when the browser is empty AND canary fails', async () => {
-    // This is the measured failure mode: soft-blocked browser serves empty
-    // pages; canary (known-good query) also comes back empty => we are blocked,
-    // NOT out of inventory. Recording no_options here would corrupt history.
+  it('records THROTTLED (not no_options) when the browser is empty AND the canary is empty', async () => {
+    // The measured failure mode: Google serves an empty page for the party, and
+    // the known-good reference cell is empty at that same party too => the
+    // CHANNEL is gated, we are not out of inventory. no_options here corrupts
+    // the availability history and later fires a bogus sold-out -> available alert.
     const d = deps({
       fetchBrowser: vi.fn(async () => ({ status: 'ok' as const, flights: [] })),
-      canaryHasInventory: vi.fn(async () => false),
+      probeCanary: matchedCanary(false),
+      probeMonotonicity: monotonicityProbe(false),
     });
     const r = await orchestrateScrape(RT_FAMILY, d, { browserBudget: 5 });
     expect(r.availability).toBe('throttled');
     expect(r.availability).not.toBe('no_options');
   });
 
-  it('does not run the canary when the browser already found flights', async () => {
-    const canary = vi.fn(async () => true);
-    const d = deps({ canaryHasInventory: canary });
+  it('MONOTONICITY: a 5-pax empty that a 1-adult probe beats on the same cell is NEVER no_options', async () => {
+    // Availability cannot grow with the party. Even with a green canary, a
+    // smaller party out-finding the full party means the zero was not earned.
+    const d = deps({
+      fetchBrowser: vi.fn(async () => ({ status: 'ok' as const, flights: [] })),
+      probeCanary: matchedCanary(true),
+      probeMonotonicity: monotonicityProbe(true),
+    });
+    const r = await orchestrateScrape(RT_FAMILY, d, { browserBudget: 5 });
+    expect(r.availability).toBe('throttled');
+    expect(r.availability).not.toBe('no_options');
+    expect(r.note).toContain('monotonicity_violation');
+  });
+
+  it('a 1-ADULT canary is not valid cover for a 5-passenger query, even though it found flights', async () => {
+    // The laundering bug (45a): a 1-adult probe passes Google's >=4 party gate all
+    // night, so a naive canary would certify every fabricated 5-pax zero as a real
+    // sold-out — worse than no canary, because it puts a green check beside a lie.
+    // The orchestrator must reject it on the party mismatch alone.
+    const naiveCanary = vi.fn(async (): Promise<PartyProbe> => ({
+      passengers: { adults: 1 },
+      cellKey: REFERENCE_CELL,
+      foundFlights: true,
+    }));
+    const d = deps({
+      fetchBrowser: vi.fn(async () => ({ status: 'ok' as const, flights: [] })),
+      probeCanary: naiveCanary,
+      probeMonotonicity: monotonicityProbe(false),
+    });
+    const r = await orchestrateScrape(RT_FAMILY, d, { browserBudget: 5 });
+    expect(r.availability).not.toBe('no_options');
+    expect(r.availability).toBe('throttled');
+    expect(r.note).toContain('canary_party_mismatch');
+  });
+
+  it('does not probe at all when the browser already found flights', async () => {
+    const canary = matchedCanary(true);
+    const mono = monotonicityProbe(false);
+    const d = deps({ probeCanary: canary, probeMonotonicity: mono });
     const r = await orchestrateScrape(RT_FAMILY, d, { browserBudget: 5 });
     expect(r.availability).toBe('available');
     expect(canary).not.toHaveBeenCalled();
+    expect(mono).not.toHaveBeenCalled();
+  });
+
+  it('skips the monotonicity probe once the canary has already failed — the verdict is settled', async () => {
+    const mono = monotonicityProbe(false);
+    const d = deps({
+      fetchBrowser: vi.fn(async () => ({ status: 'ok' as const, flights: [] })),
+      probeCanary: matchedCanary(false),
+      probeMonotonicity: mono,
+    });
+    const r = await orchestrateScrape(RT_FAMILY, d, { browserBudget: 5 });
+    expect(r.availability).toBe('throttled');
+    expect(mono).not.toHaveBeenCalled();
+  });
+
+  it('needs no monotonicity probe for a solo query — there is no smaller party', async () => {
+    const mono = monotonicityProbe(false);
+    const d = deps({
+      fetchSsr: vi.fn(async () => ({ status: 'ok' as const, flights: [] })),
+      fetchBrowser: vi.fn(async () => ({ status: 'ok' as const, flights: [] })),
+      probeCanary: matchedCanary(true),
+      probeMonotonicity: mono,
+    });
+    const solo: TfsQuery = { ...RT_ADULTS, passengers: { adults: 1 } };
+    const r = await orchestrateScrape(solo, d, { browserBudget: 5 });
+    expect(r.availability).toBe('no_options');
+    expect(mono).not.toHaveBeenCalled();
   });
 });
 
@@ -118,10 +209,38 @@ describe('orchestrateScrape browser budget', () => {
   it('reports how many browser requests it consumed (for the run-level cap)', async () => {
     const d = deps({
       fetchBrowser: vi.fn(async () => ({ status: 'ok' as const, flights: [] })),
-      canaryHasInventory: vi.fn(async () => true),
+      probeCanary: matchedCanary(true),
+      probeMonotonicity: monotonicityProbe(false),
     });
     const r = await orchestrateScrape(RT_FAMILY, d, { browserBudget: 5 });
-    // one browser fetch + one canary fetch = 2 browser-tier requests consumed
-    expect(r.browserRequestsUsed).toBe(2);
+    // browser fetch + party-matched canary + monotonicity probe = 3
+    expect(r.browserRequestsUsed).toBe(3);
+  });
+
+  it('budget starvation FAILS CLOSED: too little budget for the monotonicity probe yields throttled, not no_options', async () => {
+    // Budget 2 buys the fetch and the canary but not the monotonicity probe. The
+    // guard must refuse to confirm on a probe it could not afford to run — a
+    // sold-out claim we cannot corroborate is a claim we must not make.
+    const mono = monotonicityProbe(false);
+    const d = deps({
+      fetchBrowser: vi.fn(async () => ({ status: 'ok' as const, flights: [] })),
+      probeCanary: matchedCanary(true),
+      probeMonotonicity: mono,
+    });
+    const r = await orchestrateScrape(RT_FAMILY, d, { browserBudget: 2 });
+    expect(mono).not.toHaveBeenCalled();
+    expect(r.availability).toBe('throttled');
+    expect(r.note).toContain('monotonicity_probe_missing');
+  });
+
+  it('budget for the fetch alone yields throttled — an uncorroborated empty is never sold out', async () => {
+    const d = deps({
+      fetchBrowser: vi.fn(async () => ({ status: 'ok' as const, flights: [] })),
+      probeCanary: matchedCanary(true),
+      probeMonotonicity: monotonicityProbe(false),
+    });
+    const r = await orchestrateScrape(RT_FAMILY, d, { browserBudget: 1 });
+    expect(r.availability).toBe('throttled');
+    expect(r.note).toContain('canary_absent');
   });
 });

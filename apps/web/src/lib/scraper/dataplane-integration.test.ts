@@ -36,11 +36,9 @@ vi.mock('../dataplane/ssr-fetch', () => ({
 
 import {
   pairToTfsQuery,
-  adultsOnlyVariant,
   priceDataToDataplaneFlight,
   dataplaneFlightToPriceData,
   createFetchBrowserAdapter,
-  createCanaryHasInventory,
   runTwoTierGoogleFlights,
 } from './dataplane-integration';
 import type { DataplaneFlight } from '../dataplane/types';
@@ -143,27 +141,12 @@ describe('pairToTfsQuery', () => {
   });
 });
 
-describe('adultsOnlyVariant', () => {
-  it('strips children and infants, keeping adults (the canary query for the 3ad+2ch canonical case)', () => {
-    const family: TfsQuery = {
-      trip: 'round-trip',
-      seat: 'economy',
-      segments: [{ date: '2026-12-18', fromAirport: 'LAX', toAirport: 'AKL' }],
-      passengers: { adults: 3, children: 2, infantsInSeat: 1, infantsOnLap: 1 },
-    };
-    expect(adultsOnlyVariant(family).passengers).toEqual({ adults: 3, children: 0, infantsInSeat: 0, infantsOnLap: 0 });
-  });
-
-  it('floors adults at 1 when the source query somehow has zero adults', () => {
-    const zeroAdults: TfsQuery = {
-      trip: 'one-way',
-      seat: 'economy',
-      segments: [{ date: '2026-12-18', fromAirport: 'LAX', toAirport: 'AKL' }],
-      passengers: { adults: 0, children: 1 },
-    };
-    expect(adultsOnlyVariant(zeroAdults).passengers.adults).toBe(1);
-  });
-});
+// adultsOnlyVariant() is DELETED and its tests with it. It built the canary by
+// stripping children off the real query, so a 3a+2c family was vouched for by a
+// 3-ADULT probe — which passes Google's >=4 party gate all night and certified
+// every fabricated 5-pax zero as a genuine sold-out. The canary now runs at the
+// query's own party size through the browser tier (see ./canary.test.ts and
+// ../dataplane/no-options-guard.test.ts). (ticket-tracker-45a)
 
 describe('priceDataToDataplaneFlight', () => {
   it('maps price and airline; DataplaneFlight only needs to support the orchestrator ok/empty check', () => {
@@ -356,41 +339,6 @@ describe('createFetchBrowserAdapter', () => {
   });
 });
 
-describe('createCanaryHasInventory', () => {
-  beforeEach(() => vi.clearAllMocks());
-
-  it('fetches SSR on the adults-only variant and returns true when it finds inventory', async () => {
-    mockFetchSsr.mockResolvedValue({ status: 'ok', flights: [{ price: 6448, airlines: ['American'], legs: [] }] });
-    const canary = createCanaryHasInventory({ currency: 'USD' });
-
-    const familyQuery: TfsQuery = {
-      trip: 'round-trip', seat: 'economy',
-      segments: [{ date: '2026-12-18', fromAirport: 'LAX', toAirport: 'AKL' }],
-      passengers: { adults: 3, children: 2 },
-    };
-    const ok = await canary(familyQuery);
-
-    expect(ok).toBe(true);
-    expect(mockFetchSsr).toHaveBeenCalledTimes(1);
-    const [calledQuery] = mockFetchSsr.mock.calls[0]!;
-    expect((calledQuery as TfsQuery).passengers).toEqual({ adults: 3, children: 0, infantsInSeat: 0, infantsOnLap: 0 });
-  });
-
-  it('returns false when SSR finds nothing (the throttled signal, not sold-out)', async () => {
-    mockFetchSsr.mockResolvedValue({ status: 'ok', flights: [] });
-    const canary = createCanaryHasInventory({ currency: 'USD' });
-    const ok = await canary({ trip: 'one-way', seat: 'economy', segments: [], passengers: { adults: 1 } });
-    expect(ok).toBe(false);
-  });
-
-  it('returns false when SSR defers rather than throwing (deferred is not evidence of inventory)', async () => {
-    mockFetchSsr.mockResolvedValue({ status: 'deferred' });
-    const canary = createCanaryHasInventory({ currency: 'USD' });
-    const ok = await canary({ trip: 'one-way', seat: 'economy', segments: [], passengers: { adults: 1 } });
-    expect(ok).toBe(false);
-  });
-});
-
 describe('runTwoTierGoogleFlights (full integration through the real orchestrateScrape)', () => {
   beforeEach(() => vi.clearAllMocks());
 
@@ -404,14 +352,24 @@ describe('runTwoTierGoogleFlights (full integration through the real orchestrate
     browserBudget: 5,
   };
 
-  it('positive control: empty browser + canary confirms inventory => no_options, zero prices, canaryOk=true', async () => {
+  // Every browser-tier request — the target fetch, the party-matched canary, and
+  // the monotonicity probe — goes through navigateGoogleFlightsUrl, in that
+  // order. Sequencing them is what lets these tests drive each guard branch.
+  const RESULTS = { html: '<html>flights</html>', url: 'https://tfs.example', resultsFound: true, source: 'google_flights' };
+  const NO_OPTIONS = { html: '<html>no flights</html>', url: 'https://tfs.example', resultsFound: false, noOptions: true, source: 'google_flights' };
+  function navSequence(...results: unknown[]): void {
+    for (const r of results) mockNavigateGoogleFlightsUrl.mockResolvedValueOnce(r);
+  }
+
+  it('positive control: empty browser + party-matched canary with inventory + clean monotonicity => no_options', async () => {
     // The family's ONLY faithful browser path is the tfs URL (the q= fallback is
     // suppressed for a multi-passenger party), so drive the empty-browser case
     // through tfs succeeding with a page that yields zero flights.
-    mockNavigateGoogleFlightsUrl.mockResolvedValue({ html: '<html>no flights</html>', url: 'https://tfs.example', resultsFound: true, source: 'google_flights' });
+    // Order: target fetch (renders, but zero extractable prices) -> canary (5-pax
+    // reference cell RENDERS => channel healthy at 5 pax) -> monotonicity probe
+    // (1 adult finds nothing on the target cell either => nobody beats the family).
+    navSequence(RESULTS, RESULTS, NO_OPTIONS);
     mockExtractPrices.mockResolvedValue({ prices: [], usage: { inputTokens: 10, outputTokens: 5 } });
-    // Canary (adults-only SSR) sees real inventory — the "healthy connection, genuinely sold out" case.
-    mockFetchSsr.mockResolvedValue({ status: 'ok', flights: [{ price: 6448, airlines: ['American'], legs: [] }] });
 
     const result = await runTwoTierGoogleFlights(baseDeps);
 
@@ -420,20 +378,32 @@ describe('runTwoTierGoogleFlights (full integration through the real orchestrate
     expect(result.canaryOk).toBe(true);
   });
 
-  it('negative control: empty browser + canary ALSO empty => throttled, NOT no_options, zero prices', async () => {
-    // The family's ONLY faithful browser path is the tfs URL (the q= fallback is
-    // suppressed for a multi-passenger party), so drive the empty-browser case
-    // through tfs succeeding with a page that yields zero flights.
-    mockNavigateGoogleFlightsUrl.mockResolvedValue({ html: '<html>no flights</html>', url: 'https://tfs.example', resultsFound: true, source: 'google_flights' });
+  it('negative control: empty browser + an EMPTY party-matched canary => throttled, NOT no_options', async () => {
+    // The soft-blocked / party-gated case: the known-good reference cell is ALSO
+    // empty at 5 passengers, so we cannot tell a sold-out from a lie.
+    navSequence(RESULTS, NO_OPTIONS);
     mockExtractPrices.mockResolvedValue({ prices: [], usage: { inputTokens: 10, outputTokens: 5 } });
-    // Canary (adults-only SSR) is ALSO empty — the soft-blocked/throttled case.
-    mockFetchSsr.mockResolvedValue({ status: 'ok', flights: [] });
 
     const result = await runTwoTierGoogleFlights(baseDeps);
 
     expect(result.availability).toBe('throttled');
     expect(result.prices).toEqual([]);
     expect(result.canaryOk).toBe(false);
+  });
+
+  it('MONOTONICITY: a 5-pax empty that a 1-adult probe beats on the same cell is never no_options, even with a green canary', async () => {
+    // The fabricated >=4 gate, end to end. Target empty at 5 pax; the reference
+    // cell happens to render at 5 pax (canary green); but a 1-adult probe on the
+    // TARGET's own cell finds flights. Availability cannot grow with the party, so
+    // the 5-pax zero is not a sold-out and must not be recorded as one.
+    navSequence(RESULTS, RESULTS, RESULTS);
+    mockExtractPrices.mockResolvedValue({ prices: [], usage: { inputTokens: 10, outputTokens: 5 } });
+
+    const result = await runTwoTierGoogleFlights(baseDeps);
+
+    expect(result.availability).toBe('throttled');
+    expect(result.availability).not.toBe('no_options');
+    expect(result.prices).toEqual([]);
   });
 
   it('a SUPPRESSED family query is NEVER recorded as no_options — we declined to look, so we made no market determination', async () => {
@@ -470,17 +440,20 @@ describe('runTwoTierGoogleFlights (full integration through the real orchestrate
     'Search results No results returned. No options matching your search ' +
     'Try changing your dates or destination to see results';
 
+  const GOOGLE_ANSWERED_NO_OPTIONS = {
+    html: GOOGLE_NO_OPTIONS_TEXT,
+    url: 'https://tfs.example',
+    resultsFound: false,
+    noOptions: true,
+    source: 'google_flights',
+  };
+
   it('a family query Google ANSWERED with no-options is no_options (canary-confirmed) — not unsupported_query', async () => {
-    mockNavigateGoogleFlightsUrl.mockResolvedValue({
-      html: GOOGLE_NO_OPTIONS_TEXT,
-      url: 'https://tfs.example',
-      resultsFound: false,
-      noOptions: true,
-      source: 'google_flights',
-    });
-    // Canary (adults-only SSR) sees inventory => the route IS flying, so our
-    // empty browser result is a genuine sold-out for THIS party.
-    mockFetchSsr.mockResolvedValue({ status: 'ok', flights: [{ price: 2535, airlines: ['American'], legs: [] }] });
+    // Target: Google's explicit empty-results page. Canary: the reference cell
+    // RENDERS at the same 5-passenger party => the channel is answering 5-pax
+    // queries truthfully right now. Monotonicity: 1 adult finds nothing on the
+    // target cell either => the cell really is empty, for everyone.
+    navSequence(GOOGLE_ANSWERED_NO_OPTIONS, RESULTS, GOOGLE_ANSWERED_NO_OPTIONS);
 
     const result = await runTwoTierGoogleFlights(baseDeps); // 3 adults + 2 children
 
@@ -496,16 +469,18 @@ describe('runTwoTierGoogleFlights (full integration through the real orchestrate
     expect(mockExtractPrices).not.toHaveBeenCalled();
   });
 
-  it('no-options page + an EMPTY canary is throttled, never no_options — a soft-blocked browser serves the same clean empty page', async () => {
-    mockNavigateGoogleFlightsUrl.mockResolvedValue({
-      html: GOOGLE_NO_OPTIONS_TEXT,
-      url: 'https://tfs.example',
-      resultsFound: false,
-      noOptions: true,
-      source: 'google_flights',
-    });
-    // Canary is ALSO empty => we cannot tell sold-out from soft-blocked.
-    mockFetchSsr.mockResolvedValue({ status: 'ok', flights: [] });
+  it('THE P0 BUG: Google\'s no-options page for a 5-pax family, with the reference cell ALSO gated at 5 pax, is throttled — never no_options', async () => {
+    // This is the exact shape of the 17 fabricated "sold out" cells. Google
+    // renders a literal, realistic "No options matching your search" for the
+    // family — correct dates, correct "5 passengers" header, realistic delay —
+    // and it is a LIE. The party-matched canary is what catches it: the
+    // known-good reference cell, queried at the SAME 5 passengers, comes back
+    // empty too. The channel is gated, so no sold-out claim may be made.
+    //
+    // Note what would have happened with the OLD canary: it would have asked
+    // about 3 ADULTS, sailed through the >=4 gate, returned inventory, and
+    // certified this fabricated zero as a genuine sold-out.
+    navSequence(GOOGLE_ANSWERED_NO_OPTIONS, GOOGLE_ANSWERED_NO_OPTIONS);
 
     const result = await runTwoTierGoogleFlights(baseDeps);
 
