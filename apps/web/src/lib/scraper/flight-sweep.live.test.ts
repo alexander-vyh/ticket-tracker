@@ -80,6 +80,134 @@ const rt = (dep: string, ret: string, to = 'AKL', from = 'LAX', adults = PARTY) 
 const nights = (a: string, b: string) =>
   Math.round((Date.parse(b) - Date.parse(a)) / 86_400_000);
 
+// ---------------------------------------------------------------------------
+// Chart deliverable: one JSON object per cell, appended as it lands so partial
+// results survive an interruption.
+// ---------------------------------------------------------------------------
+const GRID_OUT =
+  process.env.GRID_OUT ?? `${process.cwd()}/flight-grid.json`;
+
+type Shape = 'direct' | 'sydney' | 'fiji';
+
+const addDays = (iso: string, n: number): string =>
+  new Date(Date.parse(iso) + n * 86_400_000).toISOString().slice(0, 10);
+
+interface GridRow {
+  shape: Shape;
+  depart: string;
+  return: string;
+  nights: number;
+  stopNights: number | null;
+  status: 'priced' | 'no_options' | 'unpriced';
+  perSeat: number | null;
+  indicativeFamily: number | null;
+  airline: string | null;
+  stops: number | null;
+  layover: string | null;
+  durationMin: number | null;
+  resultCount: number;
+  monotonicityChecked: boolean;
+  note?: string;
+}
+
+/**
+ * Map a CellResult onto the chart schema.
+ *
+ * `no_options` is reserved for an empty page whose 1-adult control is ALSO
+ * empty (monotonicity holds). Anything we merely failed to read — including a
+ * 3-adult empty that 1 adult contradicts — is `unpriced`. Sold-out and
+ * couldn't-read must never collapse into the same bucket.
+ */
+function toGridRow(
+  shape: Shape,
+  depart: string,
+  ret: string,
+  stopNights: number | null,
+  r: CellResult,
+  mono?: { genuine: boolean; reason: string },
+): GridRow {
+  const base = {
+    shape,
+    depart,
+    return: ret,
+    nights: nights(depart, ret),
+    stopNights,
+    resultCount: r.itineraries.length,
+    monotonicityChecked: mono !== undefined,
+  };
+  if (r.status === 'priced' && r.cheapest) {
+    const c = r.cheapest;
+    return {
+      ...base,
+      status: 'priced',
+      perSeat: c.perSeat,
+      indicativeFamily: c.perSeat * 5, // INDICATIVE ONLY — 5-seat depth unverified
+      airline: c.airlines.join(' + ') || null,
+      stops: c.stops,
+      layover: c.layovers[0] ?? null,
+      durationMin: c.durationMinutes,
+    };
+  }
+  const empty = {
+    ...base,
+    perSeat: null,
+    indicativeFamily: null,
+    airline: null,
+    stops: null,
+    layover: null,
+    durationMin: null,
+  };
+  if (r.status === 'no-options' && mono?.genuine) {
+    return { ...empty, status: 'no_options', note: mono.reason };
+  }
+  return {
+    ...empty,
+    status: 'unpriced',
+    note: mono && !mono.genuine ? mono.reason : (r.note ?? r.status),
+  };
+}
+
+function emit(row: GridRow): void {
+  mkdirSync(dirname(GRID_OUT), { recursive: true });
+  appendFileSync(GRID_OUT, JSON.stringify(row) + '\n');
+}
+
+/** Price one cell and emit it; empties get a 1-adult monotonicity control. */
+async function priceAndEmit(
+  shape: Shape,
+  depart: string,
+  ret: string,
+  stopNights: number | null,
+  query: Parameters<typeof searchCell>[2],
+  label: string,
+): Promise<GridRow> {
+  const r = await searchCell(browser, label, query);
+  record(`chart-${shape}`, r);
+
+  let mono: { genuine: boolean; reason: string } | undefined;
+  if (r.status === 'no-options') {
+    // Availability cannot grow with party size: if 1 adult prices where 3 does
+    // not, Google fabricated the empty and this is `unpriced`, never sold-out.
+    await new Promise((res) => setTimeout(res, THROTTLE_MS));
+    const control = await searchCell(
+      browser,
+      `CTRL 1pax ${label}`,
+      roundTrip('LAX', 'AKL', depart, ret, 1),
+    );
+    record(`chart-${shape}-control`, control);
+    mono = monotonicityCheck(r, control);
+  }
+
+  const row = toGridRow(shape, depart, ret, stopNights, r, mono);
+  emit(row);
+  console.log(
+    `${shape.padEnd(7)} ${depart} -> ${ret} (${String(row.nights).padStart(2)}n) ` +
+      `${row.status === 'priced' ? `$${row.perSeat}/seat  ${row.airline} ${row.stops}st ${row.durationMin}m` : row.status.toUpperCase() + ' ' + (row.note ?? '')}`,
+  );
+  await new Promise((res) => setTimeout(res, THROTTLE_MS));
+  return row;
+}
+
 describe.skipIf(!ENABLED)('live Google Flights sweep (3 adults max)', () => {
   beforeAll(async () => {
     const { chromium } = await import('playwright');
@@ -169,6 +297,61 @@ describe.skipIf(!ENABLED)('live Google Flights sweep (3 adults max)', () => {
     for (const r of [...priced].sort((a, b) => a.cheapest!.perSeat - b.cheapest!.perSeat).slice(0, 15)) {
       console.log('  ' + show(r));
     }
+  }, 3_600_000);
+
+  // Chart deliverable. Window Dec 1 2026 - Jan 31 2027, stays 14-30 nights.
+  const WINDOW_END = '2027-01-31';
+  const STAYS = [14, 21, 28];
+  const P1_DEPARTURES = [
+    '2026-12-01', '2026-12-04', '2026-12-07', '2026-12-10', '2026-12-13', '2026-12-16',
+    '2026-12-19', '2026-12-22', '2026-12-25', '2026-12-28', '2026-12-31',
+    '2027-01-03', '2027-01-06', '2027-01-09', '2027-01-12', '2027-01-15',
+  ];
+
+  it('phase1: DIRECT LAX-AKL across the whole window (the backbone)', async () => {
+    const cells = P1_DEPARTURES.flatMap((d) =>
+      STAYS.map((n) => ({ d, n, ret: addDays(d, n) })).filter((c) => c.ret <= WINDOW_END),
+    );
+    console.log(`phase1: ${cells.length} direct cells`);
+    const rows: GridRow[] = [];
+    for (const c of cells) {
+      rows.push(
+        await priceAndEmit('direct', c.d, c.ret, null, roundTrip('LAX', 'AKL', c.d, c.ret, PARTY), `D ${c.d}->${c.ret}`),
+      );
+    }
+    const priced = rows.filter((r) => r.status === 'priced');
+    const jan = priced.filter((r) => r.return >= '2027-01-01');
+    console.log(`\nPHASE1: ${priced.length}/${rows.length} priced. January returns priced: ${jan.length}`);
+    const best = [...priced].sort((a, b) => a.perSeat! - b.perSeat!)[0];
+    console.log(`CHEAPEST: ${best?.depart} -> ${best?.return} $${best?.perSeat}/seat ${best?.airline}`);
+    expect(rows.length).toBeGreaterThan(0);
+  }, 3_600_000);
+
+  it('phase2: SYDNEY and FIJI 3-day stops on a spread of departures', async () => {
+    // A multi-city itinerary priced as ONE booking. Never the sum of one-ways --
+    // that is a different, punitively-priced market.
+    const STOP_NIGHTS = 3;
+    const departures = [
+      '2026-12-01', '2026-12-07', '2026-12-10', '2026-12-13',
+      '2026-12-19', '2026-12-25', '2026-12-31', '2027-01-06',
+    ];
+    const rows: GridRow[] = [];
+    for (const d of departures) {
+      const ret = addDays(d, 21);
+      if (ret > WINDOW_END) continue;
+      const onward = addDays(d, STOP_NIGHTS);
+      rows.push(
+        await priceAndEmit('sydney', d, ret, STOP_NIGHTS,
+          stopover('LAX', 'SYD', 'AKL', d, onward, ret, PARTY), `SYD ${d}/${onward}->${ret}`),
+      );
+      rows.push(
+        await priceAndEmit('fiji', d, ret, STOP_NIGHTS,
+          stopover('LAX', 'NAN', 'AKL', d, onward, ret, PARTY), `NAN ${d}/${onward}->${ret}`),
+      );
+    }
+    const priced = rows.filter((r) => r.status === 'priced');
+    console.log(`\nPHASE2: ${priced.length}/${rows.length} priced.`);
+    expect(rows.length).toBeGreaterThan(0);
   }, 3_600_000);
 
   it('longtrip: mid-January returns — is a 4-5 week trip really free?', async () => {
