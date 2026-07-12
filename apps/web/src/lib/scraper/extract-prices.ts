@@ -30,13 +30,24 @@ export interface QueryFilters {
 
 /**
  * Fallback cap on extracted flights per date pair, used when no ExtractionConfig
- * row supplies one. Raised from 10 to 30 (ticket-tracker-gvh): the browser tier
- * expands the results list ("View more flights") and a busy route like LAX-AKL
- * renders ~108 flights, so a cap of 10 forced the model to pick which 90% of the
- * page to discard. Raising it costs OUTPUT tokens only — the whole page text is
- * sent as input regardless of this number — so the dominant cost is unchanged.
+ * row supplies one.
+ *
+ * Deliberately left at 10 — measured, not assumed (ticket-tracker-gvh; see
+ * extraction-recall.live.test.ts). Raising it to 30 looks obviously right (a busy
+ * route renders ~100 flights, so why cap at 10?) but the local qwen3 model does
+ * the opposite of what you would expect: on a 100-flight page it returns all 10
+ * rows when asked for 10, and only THREE rows when asked for 30. Instruction
+ * following degrades as the ask grows, so a bigger cap yields FEWER options.
+ *
+ * This is safe to leave low because the cap is now enforced by an ascending price
+ * sort followed by a slice (see the end of extractPrices), so it can only ever
+ * drop the DEAREST flights. It limits how many ALTERNATIVES you see, never the
+ * correctness of the minimum.
+ *
+ * Admins can still raise it (5..50). Re-measure with the live recall test first,
+ * especially after changing the extraction model.
  */
-const DEFAULT_MAX_RESULTS = 30;
+const DEFAULT_MAX_RESULTS = 10;
 
 const UNTRUSTED_OPEN = '<UNTRUSTED_PAGE_DATA>';
 const UNTRUSTED_CLOSE = '</UNTRUSTED_PAGE_DATA>';

@@ -155,7 +155,7 @@ model ExtractionConfig {
   adminSessionsValidFrom DateTime? // admin sessions issued before this instant are revoked (set on admin password change)
   updatedAt            DateTime  @updatedAt
   extractTimeoutSeconds Int @default(90)
-  maxFlightsPerDate     Int @default(30) // max flights kept per date pair (cheapest-first); busy routes render ~100+, and the page text is sent to the LLM in full either way, so a higher cap costs output tokens only
+  maxFlightsPerDate     Int @default(10) // max flights KEPT per date pair, cheapest-first (sorted then sliced, so this can never hide the cheapest fare). Left at 10 on measured evidence: asking qwen3 for 30 makes it return only 3 rows, while asking for 10 returns 10. See extraction-recall.live.test.ts
   maxTrackedPerRoute    Int @default(10) // max flights a user can select to track per route in the picker; bounded by maxFlightsPerDate
   previewMaxCombos      Int @default(24) // max (routes x dates) the create-time preview scrape fans out; cron does the full grid
   aggregatorsEnabled    String[] @default(["google_flights", "airline_direct"]) // sources allowed in the fallback chain; skyscanner/kayak opt-in

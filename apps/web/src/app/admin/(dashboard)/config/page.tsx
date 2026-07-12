@@ -53,7 +53,7 @@ export default function ConfigPage() {
   const [customModel, setCustomModel] = useState('');
   const [scrapeInterval, setScrapeInterval] = useState(3);
   const [extractTimeoutSeconds, setExtractTimeoutSeconds] = useState(90);
-  const [maxFlightsPerDate, setMaxFlightsPerDate] = useState(30);
+  const [maxFlightsPerDate, setMaxFlightsPerDate] = useState(10);
   const [maxTrackedPerRoute, setMaxTrackedPerRoute] = useState(10);
   const [previewMaxCombos, setPreviewMaxCombos] = useState(24);
   const [theme, setTheme] = useState<ThemeId>(DEFAULT_THEME);
@@ -142,7 +142,7 @@ export default function ConfigPage() {
           setProvider(d.data.provider);
           setScrapeInterval(d.data.scrapeInterval);
           setExtractTimeoutSeconds(d.data.extractTimeoutSeconds ?? 90);
-          setMaxFlightsPerDate(d.data.maxFlightsPerDate ?? 30);
+          setMaxFlightsPerDate(d.data.maxFlightsPerDate ?? 10);
           setMaxTrackedPerRoute(d.data.maxTrackedPerRoute ?? 10);
           setPreviewMaxCombos(d.data.previewMaxCombos ?? 24);
           setTheme(isThemeId(d.data.theme) ? d.data.theme : DEFAULT_THEME);
@@ -453,7 +453,7 @@ export default function ConfigPage() {
             onChange={(e) => setMaxFlightsPerDate(Number(e.target.value))}
           />
           <span className={styles.toggleHint}>
-            Default 30. We keep the CHEAPEST N flights of those extracted, so this never hides the best price — it caps how many alternatives you can see and track. A busy route (LAX-AKL) renders 100+ flights; raise toward 50 to see more of the tail. The full page text is sent to the LLM either way, so a higher cap costs only extra output tokens (and some latency), not extra input tokens.
+            Default 10. We keep the CHEAPEST N of the flights extracted, so this never hides the best price — it only caps how many alternatives you see and can track. Raising it does NOT reliably show more: on a 100-flight page the local qwen3 model returns 10 rows when asked for 10, but only 3 when asked for 30 — instruction-following degrades as the ask grows. Re-measure with the live recall test before changing this, especially after switching extraction model.
           </span>
         </div>
 
