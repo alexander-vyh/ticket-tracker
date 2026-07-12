@@ -383,12 +383,17 @@ describe.skipIf(!ENABLED)('live Google Flights sweep (3 adults max)', () => {
     // Christmas and New Year.
     const trips = [
       { d: '2026-12-08', r: '2027-01-14' }, // the recommended cell
+      { d: '2026-12-08', r: '2027-01-19' },
       { d: '2026-12-03', r: '2027-01-17' },
+      { d: '2026-12-05', r: '2027-01-17' },
       { d: '2026-12-10', r: '2027-01-14' },
     ];
     const rows: GridRow[] = [];
     for (const t of trips) {
-      for (const stopNights of [3, 5]) {
+      // The user said 2-5 days is acceptable; sweep all four. The stop length
+      // changes which carrier Google routes you on, so price is NOT monotonic
+      // in it -- a 5-day stop can be cheaper or far dearer than a 3-day.
+      for (const stopNights of [2, 3, 4, 5]) {
         const onward = addDays(t.d, stopNights);
         rows.push(
           await priceAndEmit('sydney', t.d, t.r, stopNights,
