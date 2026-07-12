@@ -175,7 +175,12 @@ export async function POST(request: NextRequest) {
     infantsInSeat: bodyInfantsInSeat,
     infantsOnLap: bodyInfantsOnLap,
     segments: bodySegments,
+    deepSearch: bodyDeepSearch,
   } = body;
+
+  // Opt-in to the full-list browser tier. Anything non-boolean reads as off, so
+  // a malformed body can never silently enrol a query in the expensive path.
+  const deepSearch = bodyDeepSearch === true;
 
   // Validate rawInput length
   if (typeof rawInput === 'string' && rawInput.length > MAX_RAW_INPUT) {
@@ -457,6 +462,7 @@ export async function POST(request: NextRequest) {
         children,
         infantsInSeat,
         infantsOnLap,
+        deepSearch,
         currency,
         vpnCountries,
         expiresAt: routeExpiry,

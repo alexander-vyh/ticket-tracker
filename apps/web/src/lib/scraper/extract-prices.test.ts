@@ -102,7 +102,9 @@ describe('extractPrices', () => {
       '2026-06-15',
     );
     expect(result.prices).toHaveLength(2);
-    expect(result.prices[0]!.airline).toBe('Delta');
+    // Returned cheapest-first regardless of the order the model emitted them in
+    // (the model listed Delta $623 before United $450). ticket-tracker-gvh.
+    expect(result.prices.map((p) => p.airline)).toEqual(['United', 'Delta']);
     expect(result.failureReason).toBeUndefined();
   });
 
@@ -309,8 +311,12 @@ describe('extractPrices', () => {
       '2026-06-15',
     );
     expect(result.prices).toHaveLength(2);
-    expect(result.prices[0]!.flightNumber).toBe('DL 345');
-    expect(result.prices[1]!.flightNumber).toBe('DL 901');
+    // Results come back cheapest-first, so DL 901 ($450) precedes DL 345 ($623);
+    // both flight numbers must survive extraction. ticket-tracker-gvh.
+    expect(result.prices.map((p) => [p.flightNumber, p.price])).toEqual([
+      ['DL 901', 450],
+      ['DL 345', 623],
+    ]);
   });
 
   it('throws when api key is missing', async () => {
@@ -762,5 +768,151 @@ describe('extractPrices end-to-end shape robustness (issue #139)', () => {
     expect(result.prices).toHaveLength(2);
     expect(result.prices.map((p) => p.airline).sort()).toEqual(['Delta', 'Spirit']);
     expect(result.prices.map((p) => p.price).sort((a, b) => a - b)).toEqual([98, 189]);
+  });
+});
+
+/**
+ * The cap (`maxFlightsPerDate`) reaches the model only as a PROMPT instruction —
+ * nothing in code used to sort or slice — so the MODEL decided which flights
+ * survived it, and the prompt asked it to spend that budget on carrier variety.
+ * On a ~108-result page that meant the cheapest fare need never have appeared,
+ * and pricer.ts reduces this very list to the trip's headline "cheapest" price.
+ *
+ * These tests pin the cap as a CODE invariant: sort ascending, then slice, so
+ * the cap can only ever drop the DEAREST flights. (ticket-tracker-gvh)
+ */
+describe('extractPrices — price cap can never hide the cheapest fare', () => {
+  beforeEach(() => {
+    mockExtract.mockReset();
+  });
+
+  /** N flights in deliberately non-price (DOM-ish) order, cheapest buried last. */
+  function flightsInDomOrder(prices: number[]): string {
+    return JSON.stringify(
+      prices.map((price, i) => ({
+        travelDate: '2026-06-15',
+        price,
+        currency: 'USD',
+        airline: `Carrier${i}`,
+        stops: 1,
+        duration: '14h 00m',
+      })),
+    );
+  }
+
+  const override = (maxFlightsPerDate: number) => ({
+    provider: 'anthropic',
+    model: 'claude-haiku-4-5-20251001',
+    customBaseUrl: null,
+    maxFlightsPerDate,
+    apiKey: 'test-key',
+  });
+
+  it('keeps the CHEAPEST n when the model returns more flights than the cap', async () => {
+    // The model ignored the cap and returned 8 flights with the cheapest ($499)
+    // dead last — exactly what a variety-seeking extraction of a busy page looks
+    // like. A cap of 3 must keep 499/612/745, not the first three it happened to
+    // emit (1899/1750/1620).
+    mockExtract.mockResolvedValue({
+      content: flightsInDomOrder([1899, 1750, 1620, 1400, 1180, 745, 612, 499]),
+      usage: { inputTokens: 9000, outputTokens: 400 },
+    });
+
+    const result = await extractPrices(
+      'busy route page',
+      'https://flights.google.com',
+      '2026-06-15',
+      undefined,
+      undefined,
+      true,
+      'google_flights',
+      null,
+      override(3),
+    );
+
+    expect(result.prices).toHaveLength(3);
+    expect(result.prices.map((p) => p.price)).toEqual([499, 612, 745]);
+  });
+
+  it('reports the true minimum price even when the cheapest flight was emitted last', async () => {
+    // The regression that burned us: min-over-the-kept-set must equal
+    // min-over-everything-the-model-returned.
+    const emitted = [2100, 1899, 845, 1750, 496, 1620];
+    mockExtract.mockResolvedValue({
+      content: flightsInDomOrder(emitted),
+      usage: { inputTokens: 9000, outputTokens: 400 },
+    });
+
+    const result = await extractPrices(
+      'busy route page',
+      'https://flights.google.com',
+      '2026-06-15',
+      undefined,
+      undefined,
+      true,
+      'google_flights',
+      null,
+      override(2),
+    );
+
+    const kept = Math.min(...result.prices.map((p) => p.price));
+    expect(kept).toBe(Math.min(...emitted));
+    expect(kept).toBe(496);
+    expect(result.prices[0]!.price).toBe(496); // prices[0] is the cheapest, as callers assume
+  });
+
+  it('never manufactures an empty result from a misconfigured cap of 0', async () => {
+    // An empty extraction carrying NO failureReason reads downstream as a real
+    // market observation, and the canary can turn it into `no_options` — a route
+    // recorded as sold out when we looked and then threw the flights away.
+    mockExtract.mockResolvedValue({
+      content: flightsInDomOrder([845, 496]),
+      usage: { inputTokens: 500, outputTokens: 50 },
+    });
+
+    const result = await extractPrices(
+      'page content',
+      'https://flights.google.com',
+      '2026-06-15',
+      undefined,
+      undefined,
+      true,
+      'google_flights',
+      null,
+      override(0),
+    );
+
+    expect(result.prices.length).toBeGreaterThan(0);
+    expect(result.prices[0]!.price).toBe(496);
+  });
+
+  it('applies the cap AFTER the duration filter, so a dropped slow flight frees a slot', async () => {
+    // Order of operations: if the cap ran first it could fill up with slow
+    // flights that the duration filter then removes, leaving fewer results than
+    // the cap allows.
+    mockExtract.mockResolvedValue({
+      content: JSON.stringify([
+        { travelDate: '2026-06-15', price: 400, currency: 'USD', airline: 'Slow', stops: 2, duration: '40h 00m' },
+        { travelDate: '2026-06-15', price: 900, currency: 'USD', airline: 'Fast', stops: 0, duration: '13h 00m' },
+        { travelDate: '2026-06-15', price: 950, currency: 'USD', airline: 'AlsoFast', stops: 1, duration: '16h 00m' },
+      ]),
+      usage: { inputTokens: 500, outputTokens: 50 },
+    });
+
+    const result = await extractPrices(
+      'page content',
+      'https://flights.google.com',
+      '2026-06-15',
+      { maxPrice: null, maxStops: null, maxDurationHours: 20, preferredAirlines: [], timePreference: 'any', cabinClass: 'economy' },
+      undefined,
+      true,
+      'google_flights',
+      null,
+      override(2),
+    );
+
+    // The cheap-but-40h flight is filtered out; the cap of 2 is then filled by
+    // the two surviving flights rather than being half-spent on the dropped one.
+    expect(result.prices.map((p) => p.airline)).toEqual(['Fast', 'AlsoFast']);
   });
 });

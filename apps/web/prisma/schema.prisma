@@ -25,6 +25,7 @@ model Query {
   timePreference  String   @default("any")
   cabinClass      String   @default("economy")
   tripType        String   @default("round_trip") // 'one_way' | 'round_trip' | 'open_jaw' | 'multi_city'
+  deepSearch      Boolean  @default(false) // force the full-list browser tier instead of Google's SSR top-5 "best" set, which hides cheaper one-stop carriers. Costs an LLM extraction per scrape, so it is opt-in. Queries with children already take the browser tier regardless.
   segments        Json?    // ordered [{from,to,date}] for open_jaw/multi_city; null = single-pair itinerary described by origin/destination/dateFrom/dateTo
   adults          Int      @default(1)
   children        Int      @default(0) // aged 2-11 per Google Flights
@@ -154,7 +155,7 @@ model ExtractionConfig {
   adminSessionsValidFrom DateTime? // admin sessions issued before this instant are revoked (set on admin password change)
   updatedAt            DateTime  @updatedAt
   extractTimeoutSeconds Int @default(90)
-  maxFlightsPerDate     Int @default(10) // max flights the LLM extracts per date pair; raise for busy routes
+  maxFlightsPerDate     Int @default(30) // max flights kept per date pair (cheapest-first); busy routes render ~100+, and the page text is sent to the LLM in full either way, so a higher cap costs output tokens only
   maxTrackedPerRoute    Int @default(10) // max flights a user can select to track per route in the picker; bounded by maxFlightsPerDate
   previewMaxCombos      Int @default(24) // max (routes x dates) the create-time preview scrape fans out; cron does the full grid
   aggregatorsEnabled    String[] @default(["google_flights", "airline_direct"]) // sources allowed in the fallback chain; skyscanner/kayak opt-in

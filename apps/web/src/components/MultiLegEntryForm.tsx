@@ -55,6 +55,9 @@ export function MultiLegEntryForm({ onCreated, onCancel, adminCurrency, cancelLa
   const [children, setChildren] = useState(0);
   const [infantsInSeat, setInfantsInSeat] = useState(0);
   const [infantsOnLap, setInfantsOnLap] = useState(0);
+  // Off by default: deep search forces the browser+LLM tier on every scrape of
+  // this tracker, which is the expensive path. (ticket-tracker-gvh)
+  const [deepSearch, setDeepSearch] = useState(false);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -138,6 +141,7 @@ export function MultiLegEntryForm({ onCreated, onCancel, adminCurrency, cancelLa
           children,
           infantsInSeat,
           infantsOnLap,
+          deepSearch,
           currency: adminCurrency || detectLocaleCurrency(),
         }),
       });
@@ -276,6 +280,24 @@ export function MultiLegEntryForm({ onCreated, onCancel, adminCurrency, cancelLa
         </div>
       </div>
       {fieldErrors.passengers && <span className={styles.errorText}>{fieldErrors.passengers}</span>}
+
+      <div className={styles.checkboxRow}>
+        <input
+          id="ml-deep-search"
+          className={styles.checkbox}
+          type="checkbox"
+          checked={deepSearch}
+          onChange={(e) => setDeepSearch(e.target.checked)}
+        />
+        <label className={styles.checkboxLabel} htmlFor="ml-deep-search">
+          Deep search
+          <span className={styles.checkboxHint}>
+            Reads the full carrier list instead of Google&apos;s top-5 &ldquo;best&rdquo; flights, which
+            hides cheaper one-stop routings. Slower and costs more per check. Trips with
+            children always use the full list.
+          </span>
+        </label>
+      </div>
 
       {submitError && <div className={styles.errorText}>{submitError}</div>}
 

@@ -160,6 +160,7 @@ async function scrapeOneDatePair(
   proxyUrl: string | undefined,
   vpnCountry: string | null,
   passengers: PassengerCounts,
+  deepSearch: boolean,
 ): Promise<PairScrapeResult> {
   const effectiveCurrency = pairParams.currency ?? null;
   const travelDateFallback = pairParams.dateFrom.toISOString().split('T')[0]!;
@@ -205,6 +206,10 @@ async function scrapeOneDatePair(
       proxyUrl,
       travelDateFallback,
       browserBudget: remainingBudget,
+      // Opt-in per query: skip Google's SSR top-5 "best" set (which structurally
+      // hides cheaper one-stop carriers) and take the full-list browser tier.
+      // Costs an LLM extraction per scrape, hence off by default. (ticket-tracker-gvh)
+      deepSearch,
     });
     browserBudgetUsedThisRun += orchestrated.browserRequestsUsed;
     sources.add('google_flights');
@@ -349,6 +354,9 @@ async function scrapeQueryForCountry(
     children?: number;
     infantsInSeat?: number;
     infantsOnLap?: number;
+    /** Force the full-list browser tier for an adults-only query. Undefined on
+     *  legacy fixtures/callers means off — SSR stays the cheap default. */
+    deepSearch?: boolean;
   },
   searchParams: import('./navigate').FlightSearchParams,
   config: { provider?: string; model?: string; aggregatorsEnabled?: string[] } | null,
@@ -438,6 +446,7 @@ async function scrapeQueryForCountry(
     try {
       pairResult = await scrapeOneDatePair(
         queryId, pairParams, filters, directAirlines, useAirlineDirect, aggregatorChain, countryProfile, proxyUrl, vpnCountry, passengers,
+        query.deepSearch ?? false,
       );
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);

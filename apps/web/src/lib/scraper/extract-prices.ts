@@ -28,7 +28,15 @@ export interface QueryFilters {
   cabinClass: string;
 }
 
-const DEFAULT_MAX_RESULTS = 10;
+/**
+ * Fallback cap on extracted flights per date pair, used when no ExtractionConfig
+ * row supplies one. Raised from 10 to 30 (ticket-tracker-gvh): the browser tier
+ * expands the results list ("View more flights") and a busy route like LAX-AKL
+ * renders ~108 flights, so a cap of 10 forced the model to pick which 90% of the
+ * page to discard. Raising it costs OUTPUT tokens only — the whole page text is
+ * sent as input regardless of this number — so the dominant cost is unchanged.
+ */
+const DEFAULT_MAX_RESULTS = 30;
 
 const UNTRUSTED_OPEN = '<UNTRUSTED_PAGE_DATA>';
 const UNTRUSTED_CLOSE = '</UNTRUSTED_PAGE_DATA>';
@@ -139,7 +147,7 @@ Return ONLY valid JSON — an array of UP TO ${maxResults} objects with this exa
 ]
 ${filterSection}
 General rules:
-- Return at most ${maxResults} results, sorted by price (cheapest first)
+- Return the ${maxResults} CHEAPEST flights on the page, sorted by price (cheapest first). Price rank is the ONLY criterion for which flights make the list: if the page shows more than ${maxResults} flights, drop the MOST EXPENSIVE ones. Never omit a cheaper flight in favour of a dearer one
 - Price must be a number (no $ sign, no commas)
 - For round-trip searches, Google Flights shows the FULL round-trip price on each flight. Do NOT halve or double it — extract the price exactly as shown
 ${currencyInstruction}
@@ -151,7 +159,7 @@ ${bookingUrlRule}
 - seatsLeft: if the page shows "N seats left" or "N seats left at this price", extract the number. Use null if not shown
 - flightNumber: extract the carrier code plus number when shown (e.g. "DL 345", "AA 1102", "TK 32"). Use null if only the airline name is visible without a number
 - If the travel date is not clearly visible per result, use the search date provided
-- Prefer variety: if multiple airlines are available, include at least one from each (up to the ${maxResults} limit)
+- Do NOT deduplicate by airline: if one airline has several of the cheapest flights, include every one of them. Carrier variety is only a tiebreak between flights at the SAME price — it must never displace a cheaper flight
 - Return ONLY the JSON array, no markdown, no explanation
 - If you cannot extract any flights, return an empty array []`;
 }
@@ -438,7 +446,12 @@ export async function extractPrices(
       }
     : dbConfig;
 
-  const effectiveMaxResults = config?.maxFlightsPerDate ?? maxResults;
+  // Clamped to >= 1 so a misconfigured 0 can never make the cap itself produce
+  // an empty result. An empty extraction that carries no failureReason reads
+  // downstream as a genuine market observation, and the orchestrator's canary
+  // could turn it into `no_options` — recording a route as sold out when we in
+  // fact looked at it and then threw the flights away.
+  const effectiveMaxResults = Math.max(1, config?.maxFlightsPerDate ?? maxResults);
 
   const provider = config?.provider ?? 'anthropic';
   const model = config?.model ?? 'claude-haiku-4-5-20251001';
@@ -545,6 +558,26 @@ ${UNTRUSTED_CLOSE}`;
     return { prices: [], usage: result.usage, failureReason: 'all_filtered_out' };
   }
 
-  console.log(`[extract] OK — ${durationFiltered.length} flights extracted (cheapest: $${durationFiltered[0]?.price})`);
-  return { prices: durationFiltered, usage: result.usage };
+  // Enforce the cap HERE, in code, and only after an ascending price sort.
+  //
+  // `maxResults` reaches the model as a PROMPT instruction, so before this the
+  // model alone decided which flights survived the cap — and the prompt used to
+  // ask it to spend that budget on carrier variety, which on a ~108-result page
+  // means the cheapest fares need never have appeared at all. pricer.ts then
+  // reduces this list to the trip's headline "cheapest" price, so a bad
+  // selection here is reported to the user as a real fare. Sorting before the
+  // slice makes the cap provably unable to RAISE the reported minimum: whatever
+  // the model returns, in whatever order, we keep the N cheapest of it.
+  //
+  // It also makes `prices[0] is the cheapest` a real invariant — callers and the
+  // log line below already assumed it. (ticket-tracker-gvh)
+  const ranked = [...durationFiltered].sort((a, b) => a.price - b.price);
+  const capped = ranked.slice(0, effectiveMaxResults);
+
+  const dropped = ranked.length - capped.length;
+  console.log(
+    `[extract] OK — ${capped.length} flights extracted (cheapest: $${capped[0]?.price}` +
+      `${dropped > 0 ? `; dropped ${dropped} dearer over the cap of ${effectiveMaxResults}` : ''})`,
+  );
+  return { prices: capped, usage: result.usage };
 }
