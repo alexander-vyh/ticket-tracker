@@ -1,0 +1,125 @@
+.root {
+  max-width: 72rem;
+  margin: 0 auto;
+  padding: 2rem 1.25rem 4rem;
+  font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+}
+
+.title {
+  font-size: 1.5rem;
+  font-weight: 650;
+  margin: 0 0 0.25rem;
+}
+
+.subtitle {
+  color: var(--text-secondary, #52514e);
+  font-size: 0.9375rem;
+  margin: 0 0 1.5rem;
+  max-width: 46rem;
+}
+
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.875rem;
+  padding: 1rem;
+  border-radius: 8px;
+  box-shadow: inset 0 0 0 1px rgba(11, 11, 11, 0.1);
+  margin-bottom: 1.75rem;
+}
+
+.row {
+  display: flex;
+  gap: 0.875rem;
+  flex-wrap: wrap;
+  align-items: flex-end;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.75rem;
+  color: var(--text-secondary, #52514e);
+}
+
+.field input {
+  padding: 0.375rem 0.5rem;
+  border-radius: 5px;
+  border: 1px solid rgba(11, 11, 11, 0.18);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 0.875rem;
+  min-width: 6rem;
+}
+
+.group {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  border: 1px solid rgba(11, 11, 11, 0.12);
+  border-radius: 6px;
+  padding: 0.5rem 0.75rem;
+}
+
+.group legend {
+  font-size: 0.6875rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted, #898781);
+  padding: 0 0.25rem;
+}
+
+.check {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3125rem;
+  font-size: 0.8125rem;
+  white-space: nowrap;
+}
+
+.submit {
+  padding: 0.5rem 1.125rem;
+  border-radius: 6px;
+  border: none;
+  background: #2a78d6;
+  color: #fff;
+  font: inherit;
+  font-weight: 600;
+  font-size: 0.875rem;
+  cursor: pointer;
+}
+
+.submit:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.hint {
+  font-size: 0.75rem;
+  color: var(--text-muted, #898781);
+  margin: 0;
+}
+
+.error {
+  color: #d03b3b;
+  font-weight: 600;
+  font-size: 0.875rem;
+}
+
+@media (prefers-color-scheme: dark) {
+  .form {
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.1);
+  }
+  .field input {
+    border-color: rgba(255, 255, 255, 0.2);
+  }
+  .group {
+    border-color: rgba(255, 255, 255, 0.14);
+  }
+  .submit {
+    background: #3987e5;
+  }
+}

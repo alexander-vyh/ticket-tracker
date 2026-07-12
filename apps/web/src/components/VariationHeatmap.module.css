@@ -1,0 +1,295 @@
+/*
+ * Price heatmap (ticket-tracker-izy).
+ *
+ * Colour roles follow the validated sequential blue ramp: ONE hue, monotonic in
+ * lightness (OKLCH L 0.905 -> 0.385, verified, not eyeballed). Cheap -> expensive
+ * runs light -> dark on the light surface.
+ *
+ * In DARK mode the ramp inverts (cheap = dark, receding into the surface;
+ * expensive = light, prominent). That keeps the SEMANTIC constant in both modes —
+ * more visual prominence always means more money — instead of naively flipping the
+ * hex values, which would make the cheapest cell shout.
+ *
+ * The lightest/darkest steps fall below 3:1 against their surface. That is allowed
+ * for a sequential ramp (the low end may recede), and the required relief is that
+ * every cell carries a VISIBLE price label — which it does — with its ink flipped
+ * per bucket so the text always clears the fill.
+ */
+
+.root {
+  /* Surfaces & ink */
+  --surface-1: #fcfcfb;
+  --page-plane: #f9f9f7;
+  --text-primary: #0b0b0b;
+  --text-secondary: #52514e;
+  --text-muted: #898781;
+  --gridline: #e1e0d9;
+  --border-ring: rgba(11, 11, 11, 0.1);
+
+  /* Sequential price ramp: bucket 1 = cheapest ... bucket 6 = dearest */
+  --p1: #cde2fb;
+  --p2: #9ec5f4;
+  --p3: #6da7ec;
+  --p4: #3987e5;
+  --p5: #256abf;
+  --p6: #104281;
+  /* Ink paired to each bucket so the label always clears its fill */
+  --pi1: #0b0b0b;
+  --pi2: #0b0b0b;
+  --pi3: #0b0b0b;
+  --pi4: #ffffff;
+  --pi5: #ffffff;
+  --pi6: #ffffff;
+
+  /* Non-magnitude states — deliberately NOT ramp steps */
+  --state-sold-out: #e6e5e0;
+  --state-sold-out-ink: #52514e;
+  --state-unknown: #f0efec;
+  --state-unknown-ink: #898781;
+  --status-critical: #d03b3b;
+  --accent-best: #0ca30c;
+
+  color: var(--text-primary);
+  font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+}
+
+@media (prefers-color-scheme: dark) {
+  .root {
+    --surface-1: #1a1a19;
+    --page-plane: #0d0d0d;
+    --text-primary: #ffffff;
+    --text-secondary: #c3c2b7;
+    --text-muted: #898781;
+    --gridline: #2c2c2a;
+    --border-ring: rgba(255, 255, 255, 0.1);
+
+    /* Inverted: cheap recedes into the dark surface, dear stays prominent. */
+    --p1: #104281;
+    --p2: #1c5cab;
+    --p3: #256abf;
+    --p4: #3987e5;
+    --p5: #6da7ec;
+    --p6: #cde2fb;
+    --pi1: #ffffff;
+    --pi2: #ffffff;
+    --pi3: #ffffff;
+    --pi4: #ffffff;
+    --pi5: #0b0b0b;
+    --pi6: #0b0b0b;
+
+    --state-sold-out: #2c2c2a;
+    --state-sold-out-ink: #c3c2b7;
+    --state-unknown: #232322;
+    --state-unknown-ink: #898781;
+  }
+}
+
+.hero {
+  display: flex;
+  align-items: baseline;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.25rem;
+}
+
+.heroValue {
+  font-size: 2rem;
+  font-weight: 650;
+  line-height: 1.1;
+  color: var(--text-primary);
+}
+
+.heroLabel {
+  color: var(--text-secondary);
+  font-size: 0.875rem;
+}
+
+.heroNone {
+  font-size: 1.125rem;
+  font-weight: 600;
+  color: var(--status-critical);
+}
+
+/* Coverage line — a partial sweep must never look like a complete one. */
+.coverage {
+  font-size: 0.8125rem;
+  color: var(--text-muted);
+  margin-bottom: 1rem;
+}
+
+.incomplete {
+  color: var(--status-critical);
+  font-weight: 600;
+}
+
+.scroll {
+  overflow-x: auto;
+  padding-bottom: 0.25rem;
+}
+
+.table {
+  border-collapse: separate;
+  border-spacing: 2px; /* 2px surface gap between fills */
+  background: var(--surface-1);
+}
+
+.corner,
+.colHead,
+.rowHead {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  padding: 0.25rem 0.5rem;
+  text-align: center;
+}
+
+.rowHead {
+  text-align: right;
+}
+
+.cell {
+  position: relative;
+  min-width: 4.5rem;
+  height: 2.5rem;
+  padding: 0.125rem 0.375rem;
+  border-radius: 4px;
+  text-align: center;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  cursor: default;
+  box-shadow: inset 0 0 0 1px var(--border-ring);
+}
+
+.cell:focus-visible {
+  outline: 2px solid var(--text-primary);
+  outline-offset: 1px;
+}
+
+.b1 { background: var(--p1); color: var(--pi1); }
+.b2 { background: var(--p2); color: var(--pi2); }
+.b3 { background: var(--p3); color: var(--pi3); }
+.b4 { background: var(--p4); color: var(--pi4); }
+.b5 { background: var(--p5); color: var(--pi5); }
+.b6 { background: var(--p6); color: var(--pi6); }
+
+/* States that are NOT magnitudes: never a ramp step, always a glyph + label. */
+.soldOut {
+  background: var(--state-sold-out);
+  color: var(--state-sold-out-ink);
+  font-weight: 500;
+}
+
+.throttled,
+.unpriced {
+  background: var(--state-unknown);
+  color: var(--state-unknown-ink);
+  font-weight: 500;
+}
+
+.unpriced {
+  background-image: repeating-linear-gradient(
+    45deg,
+    transparent,
+    transparent 4px,
+    var(--gridline) 4px,
+    var(--gridline) 5px
+  );
+}
+
+/* The cheapest bookable cell — marked, not recoloured, so the ramp stays honest. */
+.best {
+  box-shadow:
+    inset 0 0 0 2px var(--accent-best),
+    inset 0 0 0 3px var(--surface-1);
+}
+
+.bestTag {
+  display: block;
+  font-size: 0.5625rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--accent-best);
+  line-height: 1;
+  margin-top: 1px;
+}
+
+.legend {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  flex-wrap: wrap;
+  margin-top: 0.875rem;
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+}
+
+.rampLegend {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+}
+
+.rampSwatches {
+  display: flex;
+  gap: 2px;
+}
+
+.swatch {
+  width: 1.125rem;
+  height: 0.75rem;
+  border-radius: 2px;
+  box-shadow: inset 0 0 0 1px var(--border-ring);
+}
+
+.stateKey {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+}
+
+.stateSwatch {
+  width: 0.875rem;
+  height: 0.875rem;
+  border-radius: 3px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.625rem;
+  font-weight: 700;
+  box-shadow: inset 0 0 0 1px var(--border-ring);
+}
+
+.tooltip {
+  position: fixed;
+  z-index: 20;
+  pointer-events: none;
+  background: var(--surface-1);
+  color: var(--text-primary);
+  border-radius: 6px;
+  padding: 0.5rem 0.625rem;
+  font-size: 0.75rem;
+  line-height: 1.45;
+  box-shadow:
+    0 0 0 1px var(--border-ring),
+    0 6px 20px rgba(0, 0, 0, 0.18);
+  max-width: 16rem;
+}
+
+.tooltipPrice {
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.tooltipMuted {
+  color: var(--text-muted);
+}
+
+.empty {
+  color: var(--text-muted);
+  font-size: 0.875rem;
+  padding: 1rem 0;
+}
