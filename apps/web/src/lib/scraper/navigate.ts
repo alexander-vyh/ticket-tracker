@@ -2,6 +2,28 @@ import type { Page } from 'playwright';
 import { launchBrowser, createStealthContext } from './browser';
 import { getAirlineUrl } from './airline-urls';
 import type { CountryProfile } from './country-profiles';
+import {
+  CURRENCY_MENTION_PATTERN,
+  MIN_CURRENCY_MENTIONS,
+  NO_OPTIONS_PHRASES,
+  PRICE_TOKEN_PATTERN,
+  pageHasRequestedRoute,
+  pageRedirectedToHomepage,
+  pageShowsNoOptions,
+} from './page-verdict';
+
+// Re-exported: these moved to ./page-verdict (navigate.ts drives the browser;
+// page-verdict judges what came back) but callers and tests still import them
+// from here.
+export {
+  CURRENCY_MENTION_PATTERN,
+  MIN_CURRENCY_MENTIONS,
+  PRICE_TOKEN_PATTERN,
+  hasFlightPriceSignal,
+  pageHasRequestedRoute,
+  pageRedirectedToHomepage,
+  pageShowsNoOptions,
+} from './page-verdict';
 
 /** Random delay between min and max milliseconds */
 function randomDelay(min: number, max: number): Promise<void> {
@@ -118,6 +140,19 @@ export interface NavigationResult {
   url: string;
   resultsFound: boolean;
   source: NavigationSource;
+  /**
+   * True only when Google explicitly rendered its empty-results state for the
+   * requested route ("No options matching your search"). Distinguishes a page
+   * that ANSWERED the query with "nothing available" from one that never
+   * answered at all (block, timeout, redirect) — both of which leave
+   * resultsFound=false and are otherwise indistinguishable to callers.
+   *
+   * This is a market signal and callers may act on it, but per the
+   * orchestrator's design it is NOT sufficient on its own to record
+   * `no_options`: a soft-blocked browser can serve the same clean empty page.
+   * The SSR canary still arbitrates no_options vs throttled.
+   */
+  noOptions?: boolean;
 }
 
 // IATA codes are exactly 3 uppercase A-Z. Anything else means the upstream
@@ -136,27 +171,6 @@ export function isoDate(d: Date): string {
   // construct dates in non-UTC timezones can see a day shift here; that risk
   // predates this file and is tracked separately.
   return d.toISOString().split('T')[0]!;
-}
-
-// Issue 65: navigateAirlineDirect previously used a loose regex that accepted
-// any single currency symbol plus digit. A Turkish stub page (1964 chars,
-// "EUR" appearing in marketing copy) passed the gate, then extraction returned
-// zero prices and the cron silently saved nothing every cycle. Two-criterion
-// signal:
-//   1. Currency must be mentioned at least MIN_CURRENCY_MENTIONS times. Real
-//      airline result pages render many flight rows each with a price;
-//      marketing stubs typically mention currency 0 to 2 times in chrome.
-//   2. At least one price-shaped token (symbol or bounded code adjacent to a
-//      digit). Lookaround prevents matching "TRY" inside INDUSTRY or "EUR"
-//      inside EURO trip.
-export const CURRENCY_MENTION_PATTERN = '€|£|\\$|EUR|GBP|USD|TRY|JPY|CHF';
-export const PRICE_TOKEN_PATTERN = '(?:€|£|\\$)\\s?\\d|(?<![A-Za-z])(?:EUR|GBP|USD|TRY|JPY|CHF)(?![A-Za-z])\\s?\\d';
-export const MIN_CURRENCY_MENTIONS = 3;
-
-export function hasFlightPriceSignal(text: string): boolean {
-  const mentions = (text.match(new RegExp(CURRENCY_MENTION_PATTERN, 'g')) || []).length;
-  if (mentions < MIN_CURRENCY_MENTIONS) return false;
-  return new RegExp(PRICE_TOKEN_PATTERN).test(text);
 }
 
 function buildFlightsUrl(qPhrase: string, params: FlightSearchParams): string {
@@ -236,164 +250,12 @@ export function buildGoogleFlightsUrlCandidates(params: FlightSearchParams): str
 /** Stable label per candidate index, used in logs so failures are diagnosable. */
 const CANDIDATE_NAMES = ['verbose', 'terse', 'reworded'] as const;
 
-function escapeRegex(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
 /**
- * Verify the loaded Google Flights page shows the requested route IN THE
- * REQUESTED DIRECTION via at least one strict pattern. Loose membership +
- * proximity checks were rejected by audit because:
- *
- * * Chained routes leak: "BDS Brindisi to LHR via JFK" matched
- *   `BDS ... to ... JFK` even though the requested route never appears.
- * * Plain "to" is not token-bounded: matches inside "stop", "Toronto",
- *   "destination", so any flight card with a stop satisfies the regex
- *   regardless of the actual airports.
- * * Plain dash characters appear in dates, durations, and price ranges,
- *   so a wide context window around any dash gives false positives.
- *
- * Strict patterns demand immediate adjacency between the airport codes and
- * a route connector. That is what Google actually renders on results
- * pages: the search-bar header, breadcrumbs, and route chips all show
- * `from BDS to JFK`, `BDS - John F. Kennedy`, or `BDS → JFK` with the
- * codes adjacent to the connector.
- *
- * Failure modes this function does NOT cover:
- *
- * * Wrong date with the right route. Google renders dates in too many
- *   formats to match reliably; mitigated by carrying the date in every
- *   URL candidate and by URL rotation.
- * * Wrong trip type. Mitigated by the explicit `one way` token in every
- *   one-way URL candidate.
- *
- * Both residual risks fail-soft (the next candidate retries) rather than
- * silently overwriting good snapshots.
+ * How long to wait for a Google Flights page to settle into EITHER a results
+ * grid or an explicit empty-results verdict. See the race in
+ * navigateGoogleFlightsUrl for why this is generous rather than tight.
  */
-/**
- * Currencies allowed inside the route-validation gap. The first 21 entries
- * mirror the dropdown in apps/web/src/app/settings/page.tsx; TRY is added
- * because Flight Finder's #64 example was IST/AYT (Turkish market) and TRY
- * labels appear in those headers even though TRY is not in the settings
- * dropdown today.
- *
- * Accepted residual risk: several of these codes are also valid IATA
- * airport codes (HKD = Hakodate, BRL = Borba, CAD = Cadillac, CHF = Chefornak,
- * NOK = Nogales, DKK = Dakar military, ARS = Aragarcas, etc.). A chained
- * route like "BDS to HKD via JFK" therefore accepts under current policy.
- * Real Google Flights pages do not render that phrasing for a JFK booking,
- * so the practical corruption frequency is near zero, but the invariant is
- * not "currencies are never airport codes". Removing overlapping codes
- * would re-introduce false negatives for users in those currency locales,
- * which is the actual reported bug; on balance we keep them.
- *
- * Users selecting "Other..." in settings pass the custom code via the
- * `currency` arg to pageHasRequestedRoute, allowed dynamically.
- */
-const ALLOWED_CURRENCY_TOKENS = [
-  'USD', 'EUR', 'GBP', 'JPY', 'CAD', 'AUD', 'CHF', 'CNY', 'INR', 'MXN',
-  'BRL', 'KRW', 'SGD', 'HKD', 'SEK', 'NOK', 'DKK', 'NZD', 'THB', 'COP',
-  'ARS', 'TRY',
-] as const;
-
-export function pageHasRequestedRoute(
-  pageText: string,
-  origin: string,
-  destination: string,
-  currency?: string | null,
-): boolean {
-  const o = escapeRegex(origin);
-  const d = escapeRegex(destination);
-
-  // Tokens the strict regex allows inside the gap between origin and destination:
-  //
-  // 1. Origin and destination themselves: Google headers render the code both
-  //    as a label and a parenthetical alias ("BDS Brindisi (BDS) to JFK").
-  // 2. The currency the query uses: passed dynamically so users who selected
-  //    "Other..." in settings (any ISO 4217 3-letter code) are covered.
-  // 3. The standard supported currency list (above): covers cases where the
-  //    query has currency=null and Google auto-detects locale-appropriate.
-  //
-  // Two things block the gap:
-  //
-  // (a) Any 3-letter uppercase token NOT in the allowlist (LHR, FCO, NYC,
-  //     USA) blocks. That stops "BDS Brindisi to LHR via JFK" from matching.
-  // (b) The chaining keywords `via`, `layover`, `through`, `connecting`
-  //     block. That closes the currency/IATA overlap edge case (HKD is
-  //     also Hakodate airport): "BDS to HKD via JFK" still has `via` in
-  //     the gap, so the lazy match cannot reach JFK regardless of whether
-  //     HKD is treated as currency or airport. Real Google Flights route
-  //     headers never use these words between the airport pair.
-  const dynamicCurrency = currency && /^[A-Z]{3}$/.test(currency) ? [currency] : [];
-  const allowedInGap = [origin, destination, ...dynamicCurrency, ...ALLOWED_CURRENCY_TOKENS]
-    .map(escapeRegex)
-    .join('|');
-  // Chaining keywords matched case-insensitively. JS regex has no inline (?i)
-  // flag and the top-level /i flag would break the [A-Z]{3} IATA guard in
-  // the same alternation, so each ASCII letter is expanded to a character
-  // class via `ci` below. The helper hard-fails on regex metacharacters so a
-  // future addition to the phrase list cannot silently inject regex syntax.
-  //
-  // Phrase coverage: bare chain words (via / layover / through / connecting /
-  // stopover) plus phrase-form variants that close the currency/IATA overlap
-  // for `stop`-family chained routes ("stopping at", "stops in", "with a
-  // stop at", "connection in"). Bare `stop`/`stops`/`stopping` is NOT
-  // blocked because real flight-card metadata (`1 stop`, `Nonstop`) sits in
-  // the 80-char gap on legitimate pages.
-  const ci = (word: string): string => {
-    if (!/^[a-z]+$/.test(word)) {
-      throw new Error(`pageHasRequestedRoute: ci() expects lowercase ASCII letters only, got ${JSON.stringify(word)}`);
-    }
-    return word.split('').map((ch) => `[${ch}${ch.toUpperCase()}]`).join('');
-  };
-  const chainPhrases = [
-    ci('via'),
-    ci('layover'),
-    ci('through'),
-    ci('connecting'),
-    ci('stopover'),
-    // "stop over" / "stop-over"
-    `${ci('stop')}[-\\s]+${ci('over')}`,
-    // "stop at"/"stop in"/"stops at"/"stops in"
-    `${ci('stop')}${ci('s')}?\\s+${ci('at')}`,
-    `${ci('stop')}${ci('s')}?\\s+${ci('in')}`,
-    // "stopping at"/"stopping in"
-    `${ci('stopping')}\\s+(?:${ci('at')}|${ci('in')})`,
-    // "with stop"/"with a stop"/"with stopover"/"with a stopover"
-    `${ci('with')}\\s+(?:${ci('a')}\\s+)?${ci('stop')}(?:${ci('over')})?`,
-    // "connection"/"connection at"/"connection in"/"connection through"
-    `${ci('connection')}(?:\\s+(?:${ci('at')}|${ci('in')}|${ci('through')}))?`,
-  ];
-  const blockingChainKeyword = `\\b(?:${chainPhrases.join('|')})\\b`;
-  const noOtherIata = `(?:(?!${blockingChainKeyword})(?!\\b(?!(?:${allowedInGap})\\b)[A-Z]{3}\\b)[\\s\\S])`;
-  const strict: RegExp[] = [
-    // "from BDS to JFK" / "from BDS Brindisi to John F. Kennedy JFK".
-    new RegExp(`\\bfrom\\s+${o}\\b${noOtherIata}{0,80}\\bto\\b${noOtherIata}{0,80}\\b${d}\\b`),
-    // "BDS to JFK" / "BDS Brindisi to JFK" with no other IATA in between.
-    new RegExp(`\\b${o}\\b${noOtherIata}{0,80}\\bto\\b${noOtherIata}{0,80}\\b${d}\\b`),
-    // "BDS → JFK" / "BDS ⇒ JFK" — immediate adjacency.
-    new RegExp(`\\b${o}\\s*[→⇒]\\s*${d}\\b`),
-    // "BDS - JFK" / "BDS – JFK" / "BDS — JFK" / "BDS-JFK" — immediate adjacency.
-    new RegExp(`\\b${o}\\s*[-–—]\\s*${d}\\b`),
-  ];
-
-  return strict.some((re) => re.test(pageText));
-}
-
-/**
- * Detect the specific failure mode reported in #65: Google strips the `q`
- * parameter and redirects to the bare /travel/flights homepage. The input
- * URL has a q param; the resolved URL does not.
- */
-export function pageRedirectedToHomepage(inputUrl: string, finalUrl: string, paramName: string = 'q'): boolean {
-  try {
-    const had = new URL(inputUrl).searchParams.has(paramName);
-    const has = new URL(finalUrl).searchParams.has(paramName);
-    return had && !has;
-  } catch {
-    return false;
-  }
-}
+const VERDICT_TIMEOUT_MS = 75_000;
 
 export async function navigateGoogleFlights(
   params: FlightSearchParams,
@@ -558,13 +420,45 @@ export async function navigateGoogleFlightsUrl(
       // No consent dialog — continue
     }
 
-    let resultsFound = false;
-    try {
-      await page.waitForSelector('[data-gs]', { timeout: 15_000 });
-      resultsFound = true;
-    } catch {
-      console.log(`[navigate] tfs: selector [data-gs] not found after 15s`);
+    // Race the two states Google can settle into, rather than polling only for
+    // [data-gs] and calling everything else a failure. Google's genuine
+    // "No options matching your search" page has no [data-gs] either, so a
+    // selector-only wait cannot tell "the market has nothing" apart from "we
+    // never got an answer" — and the caller then reports a query it DID check
+    // as one it declined to check.
+    //
+    // The ceiling is generous because the two states do NOT settle on the same
+    // timescale. A results grid renders within a few seconds, but the
+    // empty-results state waits on Google's GetShoppingResults RPC, which it
+    // slow-walks under load: measured 2026-07-11 at 5-10s when fresh and 58s
+    // when the IP had been making frequent requests, returning the identical
+    // 16KB "no options" payload both times. A tight ceiling therefore
+    // systematically misreads sold-out cells as failures precisely when the
+    // scrape is busiest. This costs nothing on the happy path — the race
+    // resolves the moment EITHER state appears, so a page with results still
+    // returns in seconds; only a genuinely unsettled page waits out the clock.
+    const verdict = await page
+      .waitForFunction(
+        (phrases: readonly string[]) => {
+          if (document.querySelector('[data-gs]')) return 'results';
+          const text = document.body?.innerText ?? '';
+          if (phrases.some((p) => text.includes(p))) return 'no_options';
+          return null; // neither state yet — keep polling
+        },
+        NO_OPTIONS_PHRASES,
+        { timeout: VERDICT_TIMEOUT_MS },
+      )
+      .then((handle) => handle.jsonValue() as Promise<'results' | 'no_options'>)
+      .catch(() => null);
+
+    if (verdict === null) {
+      console.log(
+        `[navigate] tfs: page settled into neither results nor an empty-results verdict ` +
+          `within ${VERDICT_TIMEOUT_MS}ms — no market signal, caller must not infer no_options`,
+      );
     }
+
+    let resultsFound = verdict === 'results';
 
     if (resultsFound) {
       await simulateHumanBehavior(page);
@@ -576,6 +470,21 @@ export async function navigateGoogleFlightsUrl(
     const html = await page.evaluate(() => document.body.innerText);
     const finalUrl = page.url();
 
+    // Re-verify the empty-results verdict against the settled page text, which
+    // also confirms the search UI rendered the airports we asked for. A block
+    // or interstitial page cannot satisfy both conditions.
+    const noOptions =
+      verdict === 'no_options' &&
+      !pageRedirectedToHomepage(url, finalUrl, 'tfs') &&
+      pageShowsNoOptions(html, params.origin, params.destination);
+
+    if (noOptions) {
+      console.log(
+        `[navigate] tfs: Google rendered no-options for ${params.origin}->${params.destination} ` +
+          `— a market answer, not a navigation failure`,
+      );
+    }
+
     if (resultsFound && pageRedirectedToHomepage(url, finalUrl, 'tfs')) {
       console.log(`[navigate] tfs param dropped on redirect (input=${url}, final=${finalUrl}) — treating as failed`);
       resultsFound = false;
@@ -585,10 +494,10 @@ export async function navigateGoogleFlightsUrl(
       resultsFound = false;
     }
 
-    console.log(`[navigate] tfs: resultsFound=${resultsFound}, textLength=${html.length}, finalUrl=${finalUrl}, elapsed=${Date.now() - attemptStart}ms`);
+    console.log(`[navigate] tfs: resultsFound=${resultsFound}, noOptions=${noOptions}, textLength=${html.length}, finalUrl=${finalUrl}, elapsed=${Date.now() - attemptStart}ms`);
 
     await context.close();
-    return { html, url, resultsFound, source: 'google_flights' };
+    return { html, url, resultsFound, noOptions, source: 'google_flights' };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.error(`[navigate] tfs attempt failed (elapsed=${Date.now() - attemptStart}ms): ${message}`);

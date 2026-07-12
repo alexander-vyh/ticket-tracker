@@ -456,6 +456,65 @@ describe('runTwoTierGoogleFlights (full integration through the real orchestrate
     expect(result.prices).toEqual([]);
   });
 
+  // The mirror image of the suppression test above, and the ticket-tracker-zfj
+  // root cause. Live-verified 2026-07-11: for 3 adults + 2 children on
+  // LAX->AKL 2026-12-08/2026-12-31, Google itself renders "No options matching
+  // your search" — in the container AND in a real desktop browser on a
+  // residential IP — while 5 adults on the same dates prices at $4,120 and the
+  // same family prices at $3,725 on adjacent dates. That is an ANSWER, not a
+  // block. Reporting it as `unsupported_query` ("we declined to look") was a
+  // false statement about a query we did check, and it left the family trip
+  // permanently unpriceable AND unmarkable as sold out.
+  const GOOGLE_NO_OPTIONS_TEXT =
+    'Flight search Round trip 5 Economy Los Angeles LAX Auckland AKL Filters ' +
+    'Search results No results returned. No options matching your search ' +
+    'Try changing your dates or destination to see results';
+
+  it('a family query Google ANSWERED with no-options is no_options (canary-confirmed) — not unsupported_query', async () => {
+    mockNavigateGoogleFlightsUrl.mockResolvedValue({
+      html: GOOGLE_NO_OPTIONS_TEXT,
+      url: 'https://tfs.example',
+      resultsFound: false,
+      noOptions: true,
+      source: 'google_flights',
+    });
+    // Canary (adults-only SSR) sees inventory => the route IS flying, so our
+    // empty browser result is a genuine sold-out for THIS party.
+    mockFetchSsr.mockResolvedValue({ status: 'ok', flights: [{ price: 2535, airlines: ['American'], legs: [] }] });
+
+    const result = await runTwoTierGoogleFlights(baseDeps); // 3 adults + 2 children
+
+    expect(result.availability).toBe('no_options');
+    // NOT a failure: we looked and Google answered. A non-market failure reason
+    // here would suppress the availability determination entirely.
+    expect(result.failureReason).toBeUndefined();
+    expect(result.prices).toEqual([]);
+    expect(result.canaryOk).toBe(true);
+    // The passenger-less q= fallback must STILL never run for a family query.
+    expect(mockNavigateGoogleFlights).not.toHaveBeenCalled();
+    // No LLM extraction on an empty page — there is nothing to extract.
+    expect(mockExtractPrices).not.toHaveBeenCalled();
+  });
+
+  it('no-options page + an EMPTY canary is throttled, never no_options — a soft-blocked browser serves the same clean empty page', async () => {
+    mockNavigateGoogleFlightsUrl.mockResolvedValue({
+      html: GOOGLE_NO_OPTIONS_TEXT,
+      url: 'https://tfs.example',
+      resultsFound: false,
+      noOptions: true,
+      source: 'google_flights',
+    });
+    // Canary is ALSO empty => we cannot tell sold-out from soft-blocked.
+    mockFetchSsr.mockResolvedValue({ status: 'ok', flights: [] });
+
+    const result = await runTwoTierGoogleFlights(baseDeps);
+
+    expect(result.availability).toBe('throttled');
+    expect(result.availability).not.toBe('no_options');
+    expect(result.prices).toEqual([]);
+    expect(result.canaryOk).toBe(false);
+  });
+
   it('available path: browser finds real flights => availability available, real PriceData preserved, canary never consulted', async () => {
     // baseDeps is the 5-person family. Its ONLY faithful browser path is the tfs
     // URL (which encodes the party); the passenger-less q= fallback is suppressed,

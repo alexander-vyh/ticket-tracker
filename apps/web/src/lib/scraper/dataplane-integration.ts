@@ -231,13 +231,49 @@ export function createFetchBrowserAdapter(deps: FetchBrowserAdapterDeps): FetchB
     });
 
     let nav = null as Awaited<ReturnType<typeof navigateGoogleFlights>> | null;
+    let tfsSaidNoOptions = false;
     try {
       const tfsNav = await navigateGoogleFlightsUrl(tfsUrl, deps.pairParams, deps.countryProfile, deps.proxyUrl);
       if (tfsNav.resultsFound) nav = tfsNav;
+      else if (tfsNav.noOptions) {
+        tfsSaidNoOptions = true;
+        lastHtml = tfsNav.html;
+      }
     } catch {
       // tfs navigation is speculative — any failure (including a throw) falls
       // through to the proven q= path below rather than propagating.
     }
+
+    // Google loaded the tfs URL — the exact route, dates and party we asked for —
+    // and answered "no options matching your search". That is a MARKET signal:
+    // we looked, and there is nothing to buy. It must not be conflated with the
+    // suppression path below, which asserts the opposite ("we never looked").
+    //
+    // Live-verified 2026-07-11 on the LAX->AKL 2026-12-08/2026-12-31 family
+    // query (3 adults + 2 children): Google returns no options for that party,
+    // in the container AND in a real desktop browser on a residential IP, while
+    // the same dates price fine for 5 adults and the same party prices fine on
+    // adjacent dates. Before this branch existed, that answer was reported as
+    // `unsupported_query` — the pipeline claimed it had declined to check a
+    // query it had in fact checked, so the family trip could never be priced OR
+    // honestly marked sold-out.
+    //
+    // We deliberately do NOT set availability here. Returning an empty result
+    // with no failure reason hands the no_options-vs-throttled call to the
+    // orchestrator's SSR canary, which is the audited arbiter: a soft-blocked
+    // browser can serve a clean empty page too, and only the canary (adults-only
+    // SSR, throttle-resilient) can tell those apart.
+    if (!nav && tfsSaidNoOptions) {
+      console.log(
+        `[dataplane] tfs returned Google's explicit no-options page for ` +
+          `${deps.pairParams.origin}->${deps.pairParams.destination} — deferring to the canary ` +
+          `to confirm no_options vs throttled`,
+      );
+      prices = [];
+      failureReason = undefined;
+      return { status: 'ok', flights: [] };
+    }
+
     if (!nav) {
       // The NL q= fallback builds a search from origin/destination + dates only.
       // It cannot express TWO things the tfs URL can, and in both cases it would
