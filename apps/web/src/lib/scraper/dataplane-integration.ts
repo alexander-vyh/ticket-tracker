@@ -239,15 +239,42 @@ export function createFetchBrowserAdapter(deps: FetchBrowserAdapterDeps): FetchB
       // through to the proven q= path below rather than propagating.
     }
     if (!nav) {
-      // The NL q= fallback builds a search from origin/destination + dates,
-      // which can only express a one-way or round-trip. For an open-jaw /
-      // multi-city itinerary that fallback would silently reprice a *different*
-      // (reversed round-trip) route, so suppress it: return no results and let
-      // the orchestrator's SSR canary decide no_options vs throttled on the
-      // real multi-city query. (ticket-tracker-k5m.5)
+      // The NL q= fallback builds a search from origin/destination + dates only.
+      // It cannot express TWO things the tfs URL can, and in both cases it would
+      // silently price a DIFFERENT trip than the one we asked for — which is far
+      // worse than admitting we could not check.
+      //
+      //  1. Route shape: an open-jaw / multi-city itinerary would be repriced as
+      //     a reversed round-trip. (ticket-tracker-k5m.5)
+      //  2. Passengers: buildGoogleFlightsUrlCandidates puts NO passenger count
+      //     in the phrase, so Google prices ONE ADULT. A 3-adult + 2-child family
+      //     query would come back with a single-adult fare and be reported as the
+      //     party total — live-caught by the ticket-tracker-njl e2e, which
+      //     returned $845 (one adult) for a 5-person LAX->AKL round trip.
+      //
+      // In both cases: return no results and let the orchestrator's SSR canary
+      // decide no_options vs throttled on the REAL query.
       const isMultiSegment = query.trip === 'open-jaw' || query.trip === 'multi-city';
-      if (isMultiSegment) {
+      const p = query.passengers;
+      const isSingleAdult =
+        (p.adults ?? 1) === 1 &&
+        (p.children ?? 0) === 0 &&
+        (p.infantsInSeat ?? 0) === 0 &&
+        (p.infantsOnLap ?? 0) === 0;
+
+      if (isMultiSegment || !isSingleAdult) {
+        console.log(
+          `[dataplane] suppressing NL q= fallback — it cannot express ` +
+            `${isMultiSegment ? `trip=${query.trip}` : `party(${p.adults}a/${p.children ?? 0}c)`}; ` +
+            `reporting no browser result rather than a wrong-party/wrong-route price`,
+        );
         prices = [];
+        // CRITICAL: mark this as a non-market failure. We DECLINED to look, so the
+        // orchestrator must not let its canary turn this empty result into
+        // "no_options" — that would record a route as sold out when we never
+        // checked it, poisoning the availability history (and later firing a bogus
+        // no_options -> available alert). See NON_MARKET_FAILURE_REASONS.
+        failureReason = 'unsupported_query';
         return { status: 'ok', flights: [] };
       }
       nav = await navigateGoogleFlights(deps.pairParams, deps.countryProfile, deps.proxyUrl);
@@ -313,6 +340,12 @@ const NON_MARKET_FAILURE_REASONS: ReadonlySet<ExtractionFailureReason> = new Set
   'llm_error',
   'json_parse_error',
   'no_json_in_response',
+  // We declined to fetch because no path could faithfully express the query. We
+  // never looked at the market, so this can never mean "sold out". Without this,
+  // a suppressed family query returns an empty browser result, the canary sees
+  // adults-only inventory, and the orchestrator concludes no_options for a trip
+  // it never actually checked. (ticket-tracker-njl)
+  'unsupported_query',
 ]);
 
 export interface TwoTierResult {

@@ -162,7 +162,15 @@ export type ExtractionFailureReason =
   | 'empty_extraction'
   | 'all_filtered_out'
   | 'llm_error'
-  | 'json_parse_error';
+  | 'json_parse_error'
+  /**
+   * No available fetch path can FAITHFULLY express this query, so we declined to
+   * run one rather than price a different trip (e.g. a multi-passenger party or
+   * an open-jaw route falling back to the NL q= path, which encodes neither).
+   * This is emphatically NOT a market signal: we never looked, so it must never
+   * be reported as no_options. (ticket-tracker-njl)
+   */
+  | 'unsupported_query';
 
 export interface ExtractionResult {
   prices: PriceData[];

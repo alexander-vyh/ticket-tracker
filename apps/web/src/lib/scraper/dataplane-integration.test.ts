@@ -239,6 +239,14 @@ describe('createFetchBrowserAdapter', () => {
     passengers: { adults: 3, children: 2 },
   };
 
+  // The NL q= fallback puts NO passenger count in the phrase, so Google prices a
+  // single adult. It is therefore only a FAITHFUL fallback for a solo-adult
+  // query; anything else must suppress it (see the suppression tests below).
+  const soloQuery: TfsQuery = {
+    ...tfsQuery,
+    passengers: { adults: 1, children: 0, infantsInSeat: 0, infantsOnLap: 0 },
+  };
+
   it('uses the tfs URL result directly when it finds results, without falling back to the legacy path', async () => {
     mockNavigateGoogleFlightsUrl.mockResolvedValue({ html: '<html>tfs</html>', url: 'https://tfs.example', resultsFound: true, source: 'google_flights' });
     mockExtractPrices.mockResolvedValue({ prices: [SAMPLE_PRICE], usage: { inputTokens: 10, outputTokens: 5 } });
@@ -254,6 +262,47 @@ describe('createFetchBrowserAdapter', () => {
     expect(adapter.getPrices()).toEqual([SAMPLE_PRICE]);
   });
 
+  it('REFUSES the legacy q= fallback for a multi-passenger party (it would price ONE ADULT)', async () => {
+    // Live-caught by the ticket-tracker-njl e2e: a 3-adult + 2-child LAX->AKL
+    // round trip fell back to the q= path, whose phrase carries NO passenger
+    // count, so Google priced a single adult and $845 was reported as the FAMILY
+    // total. Suppress the fallback rather than return a wrong-party price.
+    mockNavigateGoogleFlightsUrl.mockResolvedValue({ html: '', url: 'https://tfs.example', resultsFound: false, source: 'google_flights' });
+    mockNavigateGoogleFlights.mockResolvedValue({ html: '<html>legacy</html>', url: 'https://legacy.example', resultsFound: true, source: 'google_flights' });
+    mockExtractPrices.mockResolvedValue({ prices: [SAMPLE_PRICE], usage: { inputTokens: 10, outputTokens: 5 } });
+
+    const adapter = createFetchBrowserAdapter({
+      pairParams: PAIR_PARAMS, filters: FILTERS, countryProfile: undefined, proxyUrl: undefined, travelDateFallback: '2026-12-18',
+    });
+    const result = await adapter.fetchBrowser(tfsQuery); // 3 adults + 2 children
+
+    expect(mockNavigateGoogleFlights).not.toHaveBeenCalled();
+    expect(mockExtractPrices).not.toHaveBeenCalled();
+    // Empty (not error) so the orchestrator's canary decides no_options vs throttled.
+    expect(result).toEqual({ status: 'ok', flights: [] });
+    expect(adapter.getPrices()).toEqual([]);
+  });
+
+  it('REFUSES the legacy q= fallback for an open-jaw itinerary (it would reprice a mirrored round trip)', async () => {
+    mockNavigateGoogleFlightsUrl.mockResolvedValue({ html: '', url: 'https://tfs.example', resultsFound: false, source: 'google_flights' });
+    mockNavigateGoogleFlights.mockResolvedValue({ html: '<html>legacy</html>', url: 'https://legacy.example', resultsFound: true, source: 'google_flights' });
+
+    const adapter = createFetchBrowserAdapter({
+      pairParams: PAIR_PARAMS, filters: FILTERS, countryProfile: undefined, proxyUrl: undefined, travelDateFallback: '2026-12-18',
+    });
+    const result = await adapter.fetchBrowser({
+      ...soloQuery, // solo adult, so ONLY the route shape can trigger suppression
+      trip: 'open-jaw',
+      segments: [
+        { date: '2026-12-18', fromAirport: 'LAX', toAirport: 'AKL' },
+        { date: '2027-01-08', fromAirport: 'CHC', toAirport: 'LAX' },
+      ],
+    });
+
+    expect(mockNavigateGoogleFlights).not.toHaveBeenCalled();
+    expect(result).toEqual({ status: 'ok', flights: [] });
+  });
+
   it('falls back to the legacy q= path when tfs navigation finds no results', async () => {
     mockNavigateGoogleFlightsUrl.mockResolvedValue({ html: '', url: 'https://tfs.example', resultsFound: false, source: 'google_flights' });
     mockNavigateGoogleFlights.mockResolvedValue({ html: '<html>legacy</html>', url: 'https://legacy.example', resultsFound: true, source: 'google_flights' });
@@ -262,7 +311,7 @@ describe('createFetchBrowserAdapter', () => {
     const adapter = createFetchBrowserAdapter({
       pairParams: PAIR_PARAMS, filters: FILTERS, countryProfile: undefined, proxyUrl: undefined, travelDateFallback: '2026-12-18',
     });
-    await adapter.fetchBrowser(tfsQuery);
+    await adapter.fetchBrowser(soloQuery);
 
     expect(mockNavigateGoogleFlights).toHaveBeenCalledTimes(1);
     expect(mockExtractPrices).toHaveBeenCalledTimes(1);
@@ -277,7 +326,7 @@ describe('createFetchBrowserAdapter', () => {
     const adapter = createFetchBrowserAdapter({
       pairParams: PAIR_PARAMS, filters: FILTERS, countryProfile: undefined, proxyUrl: undefined, travelDateFallback: '2026-12-18',
     });
-    const result = await adapter.fetchBrowser(tfsQuery);
+    const result = await adapter.fetchBrowser(soloQuery);
 
     expect(mockNavigateGoogleFlights).toHaveBeenCalledTimes(1);
     expect(result.status).toBe('ok');
@@ -291,7 +340,7 @@ describe('createFetchBrowserAdapter', () => {
       pairParams: PAIR_PARAMS, filters: FILTERS, countryProfile: undefined, proxyUrl: undefined, travelDateFallback: '2026-12-18',
     });
 
-    await expect(adapter.fetchBrowser(tfsQuery)).rejects.toThrow('browser crashed');
+    await expect(adapter.fetchBrowser(soloQuery)).rejects.toThrow('browser crashed');
   });
 
   it('returns an empty (not error) BrowserFetchResult when extraction yields zero prices, so the orchestrator can consult the canary', async () => {
@@ -356,8 +405,10 @@ describe('runTwoTierGoogleFlights (full integration through the real orchestrate
   };
 
   it('positive control: empty browser + canary confirms inventory => no_options, zero prices, canaryOk=true', async () => {
-    mockNavigateGoogleFlightsUrl.mockResolvedValue({ html: '', url: 'https://tfs.example', resultsFound: false, source: 'google_flights' });
-    mockNavigateGoogleFlights.mockResolvedValue({ html: '<html>no flights</html>', url: 'https://legacy.example', resultsFound: true, source: 'google_flights' });
+    // The family's ONLY faithful browser path is the tfs URL (the q= fallback is
+    // suppressed for a multi-passenger party), so drive the empty-browser case
+    // through tfs succeeding with a page that yields zero flights.
+    mockNavigateGoogleFlightsUrl.mockResolvedValue({ html: '<html>no flights</html>', url: 'https://tfs.example', resultsFound: true, source: 'google_flights' });
     mockExtractPrices.mockResolvedValue({ prices: [], usage: { inputTokens: 10, outputTokens: 5 } });
     // Canary (adults-only SSR) sees real inventory — the "healthy connection, genuinely sold out" case.
     mockFetchSsr.mockResolvedValue({ status: 'ok', flights: [{ price: 6448, airlines: ['American'], legs: [] }] });
@@ -370,8 +421,10 @@ describe('runTwoTierGoogleFlights (full integration through the real orchestrate
   });
 
   it('negative control: empty browser + canary ALSO empty => throttled, NOT no_options, zero prices', async () => {
-    mockNavigateGoogleFlightsUrl.mockResolvedValue({ html: '', url: 'https://tfs.example', resultsFound: false, source: 'google_flights' });
-    mockNavigateGoogleFlights.mockResolvedValue({ html: '<html>no flights</html>', url: 'https://legacy.example', resultsFound: true, source: 'google_flights' });
+    // The family's ONLY faithful browser path is the tfs URL (the q= fallback is
+    // suppressed for a multi-passenger party), so drive the empty-browser case
+    // through tfs succeeding with a page that yields zero flights.
+    mockNavigateGoogleFlightsUrl.mockResolvedValue({ html: '<html>no flights</html>', url: 'https://tfs.example', resultsFound: true, source: 'google_flights' });
     mockExtractPrices.mockResolvedValue({ prices: [], usage: { inputTokens: 10, outputTokens: 5 } });
     // Canary (adults-only SSR) is ALSO empty — the soft-blocked/throttled case.
     mockFetchSsr.mockResolvedValue({ status: 'ok', flights: [] });
@@ -383,9 +436,31 @@ describe('runTwoTierGoogleFlights (full integration through the real orchestrate
     expect(result.canaryOk).toBe(false);
   });
 
-  it('available path: browser finds real flights => availability available, real PriceData preserved, canary never consulted', async () => {
+  it('a SUPPRESSED family query is NEVER recorded as no_options — we declined to look, so we made no market determination', async () => {
+    // The trap (live-caught in ticket-tracker-njl): the family's q= fallback is
+    // suppressed, so the browser returns empty. The canary then finds adults-only
+    // inventory and the orchestrator would conclude "the family trip is SOLD OUT"
+    // — for a trip it never actually checked. That poisons the availability
+    // history and can later fire a bogus no_options -> available alert.
     mockNavigateGoogleFlightsUrl.mockResolvedValue({ html: '', url: 'https://tfs.example', resultsFound: false, source: 'google_flights' });
-    mockNavigateGoogleFlights.mockResolvedValue({ html: '<html>flights</html>', url: 'https://legacy.example', resultsFound: true, source: 'google_flights' });
+    mockNavigateGoogleFlights.mockResolvedValue({ html: '<html>legacy</html>', url: 'https://legacy.example', resultsFound: true, source: 'google_flights' });
+    // Canary DOES see inventory — this is precisely what would force no_options.
+    mockFetchSsr.mockResolvedValue({ status: 'ok', flights: [{ price: 6448, airlines: ['American'], legs: [] }] });
+
+    const result = await runTwoTierGoogleFlights(baseDeps); // 3 adults + 2 children
+
+    expect(mockNavigateGoogleFlights).not.toHaveBeenCalled();
+    expect(result.failureReason).toBe('unsupported_query');
+    // undefined = "no market determination made" (NOT no_options, NOT available).
+    expect(result.availability).toBeUndefined();
+    expect(result.prices).toEqual([]);
+  });
+
+  it('available path: browser finds real flights => availability available, real PriceData preserved, canary never consulted', async () => {
+    // baseDeps is the 5-person family. Its ONLY faithful browser path is the tfs
+    // URL (which encodes the party); the passenger-less q= fallback is suppressed,
+    // so this test drives the tfs path succeeding.
+    mockNavigateGoogleFlightsUrl.mockResolvedValue({ html: '<html>flights</html>', url: 'https://tfs.example', resultsFound: true, source: 'google_flights' });
     mockExtractPrices.mockResolvedValue({ prices: [SAMPLE_PRICE], usage: { inputTokens: 10, outputTokens: 5 } });
 
     const result = await runTwoTierGoogleFlights(baseDeps);
