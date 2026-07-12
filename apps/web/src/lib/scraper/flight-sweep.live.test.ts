@@ -354,6 +354,56 @@ describe.skipIf(!ENABLED)('live Google Flights sweep (3 adults max)', () => {
     expect(rows.length).toBeGreaterThan(0);
   }, 3_600_000);
 
+  it('holiday: daily Dec 8-24 departures x January returns (the user\'s real constraint)', async () => {
+    // The user must be IN New Zealand for Dec 25 AND Jan 1, so depart <= Dec 24
+    // and return >= Jan 2. That collides with the Jan 2-9 return peak, which is
+    // why every floor-priced holiday trip found so far is 33+ nights. Daily
+    // resolution across the Dec 13-22 departure cliff to find the true edge.
+    const departures = Array.from({ length: 17 }, (_, i) => addDays('2026-12-08', i)); // Dec 8..24
+    const returns = ['2027-01-02', '2027-01-06', '2027-01-12', '2027-01-14', '2027-01-17', '2027-01-20'];
+    const cells = departures.flatMap((d) => returns.map((r) => ({ d, r })));
+    console.log(`holiday: ${cells.length} cells`);
+    const rows: GridRow[] = [];
+    for (const c of cells) {
+      rows.push(
+        await priceAndEmit('direct', c.d, c.r, null, roundTrip('LAX', 'AKL', c.d, c.r, PARTY), `H ${c.d}->${c.r}`),
+      );
+    }
+    const priced = rows.filter((r) => r.status === 'priced');
+    const floor = priced.filter((r) => r.perSeat! <= 750);
+    console.log(`\nHOLIDAY: ${priced.length}/${rows.length} priced. At/below $750: ${floor.length}`);
+    const shortest = [...floor].sort((a, b) => a.nights - b.nights)[0];
+    console.log(`SHORTEST trip at the floor: ${shortest?.depart} -> ${shortest?.return} (${shortest?.nights}n) $${shortest?.perSeat} ${shortest?.airline}`);
+    expect(rows.length).toBeGreaterThan(0);
+  }, 3_600_000);
+
+  it('holidaystop: Sydney / Fiji stops ON the recommended holiday-spanning trips', async () => {
+    // The gap the team lead named: every stopover measured so far sits on a
+    // departure the user cannot actually take. Price them on trips that do span
+    // Christmas and New Year.
+    const trips = [
+      { d: '2026-12-08', r: '2027-01-14' }, // the recommended cell
+      { d: '2026-12-03', r: '2027-01-17' },
+      { d: '2026-12-10', r: '2027-01-14' },
+    ];
+    const rows: GridRow[] = [];
+    for (const t of trips) {
+      for (const stopNights of [3, 5]) {
+        const onward = addDays(t.d, stopNights);
+        rows.push(
+          await priceAndEmit('sydney', t.d, t.r, stopNights,
+            stopover('LAX', 'SYD', 'AKL', t.d, onward, t.r, PARTY), `HSYD ${t.d}+${stopNights}d->${t.r}`),
+        );
+        rows.push(
+          await priceAndEmit('fiji', t.d, t.r, stopNights,
+            stopover('LAX', 'NAN', 'AKL', t.d, onward, t.r, PARTY), `HNAN ${t.d}+${stopNights}d->${t.r}`),
+        );
+      }
+    }
+    console.log(`\nHOLIDAYSTOP: ${rows.filter((r) => r.status === 'priced').length}/${rows.length} priced.`);
+    expect(rows.length).toBeGreaterThan(0);
+  }, 3_600_000);
+
   it('longtrip: mid-January returns — is a 4-5 week trip really free?', async () => {
     // Dec 10 -> Jan 14 priced at the same $745/seat as the 18-night baseline.
     // If that holds across neighbouring dates it is a real cliff, not a fluke.
