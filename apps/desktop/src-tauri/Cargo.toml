@@ -3,6 +3,7 @@ name = "flight-finder-desktop"
 version = "0.13.0"
 description = "Flight Finder desktop launcher"
 authors = ["Flight Finder"]
+license = "GPL-3.0-only"
 edition = "2021"
 rust-version = "1.77.2"
 

@@ -2,6 +2,7 @@
   "name": "@flight-finder/desktop",
   "version": "0.13.0",
   "private": true,
+  "license": "GPL-3.0-only",
   "description": "Flight Finder desktop launcher — run a self-hosted instance or connect to one, no terminal",
   "scripts": {
     "tauri": "tauri",

@@ -7,8 +7,8 @@ Thanks for your interest in contributing! Flight Finder is a self-hosted flight 
 Requires Node.js >= 22.
 
 ```bash
-git clone git@github.com:affromero/flight-finder.git
-cd flight-finder
+git clone git@github.com:alexander-vyh/ticket-tracker.git
+cd ticket-tracker
 npm install
 docker compose up -d db redis
 npm run db:push
@@ -46,7 +46,7 @@ All three must pass. The linter runs with `--max-warnings 0` (zero tolerance).
 - **Extraction improvements** — better price parsing, new airline support
 - **UI enhancements** — chart features, responsive design, accessibility
 - **Documentation** — setup guides, troubleshooting, translations
-- **Bug fixes** — check [Issues](https://github.com/affromero/flight-finder/issues)
+- **Bug fixes** — check [Issues](https://github.com/alexander-vyh/ticket-tracker/issues)
 
 ## Commit Messages
 

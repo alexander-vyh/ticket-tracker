@@ -6,22 +6,22 @@
 
 Track flight prices over time. Self-hosted. Open source. Bring your own LLM.
 
-[![GitHub Release](https://img.shields.io/github/v/release/affromero/flight-finder)](https://github.com/affromero/flight-finder/releases/latest)
-[![CI](https://img.shields.io/github/actions/workflow/status/affromero/flight-finder/ci.yml?label=CI)](https://github.com/affromero/flight-finder/actions/workflows/ci.yml)
-[![Gitleaks](https://img.shields.io/github/actions/workflow/status/affromero/flight-finder/gitleaks.yml?branch=main&label=gitleaks&logo=github)](https://github.com/affromero/flight-finder/actions/workflows/gitleaks.yml)
+[![GitHub Release](https://img.shields.io/github/v/release/alexander-vyh/ticket-tracker)](https://github.com/alexander-vyh/ticket-tracker/releases/latest)
+[![CI](https://img.shields.io/github/actions/workflow/status/alexander-vyh/ticket-tracker/ci.yml?label=CI)](https://github.com/alexander-vyh/ticket-tracker/actions/workflows/ci.yml)
+[![Gitleaks](https://img.shields.io/github/actions/workflow/status/alexander-vyh/ticket-tracker/gitleaks.yml?branch=main&label=gitleaks&logo=github)](https://github.com/alexander-vyh/ticket-tracker/actions/workflows/gitleaks.yml)
 [![Docker](https://img.shields.io/badge/Docker-deployed-2496ED?logo=docker&logoColor=white)](https://github.com/affromero/flight-finder/pkgs/container/flight-finder)
-[![License: MIT](https://img.shields.io/github/license/affromero/flight-finder)](https://github.com/affromero/flight-finder/blob/main/LICENSE)
+[![License: GPL v3](https://img.shields.io/github/license/alexander-vyh/ticket-tracker)](https://github.com/alexander-vyh/ticket-tracker/blob/main/LICENSE)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-blue)](https://www.typescriptlang.org/)
 [![Next.js](https://img.shields.io/badge/Next.js-16-black?logo=next.js)](https://nextjs.org)
 [![Prisma](https://img.shields.io/badge/Prisma-7-2D3748?logo=prisma)](https://prisma.io)
 [![Socket](https://img.shields.io/badge/Socket-protected-blueviolet?logo=socket.dev)](https://socket.dev)
 [![min-release-age](https://img.shields.io/badge/min--release--age-7%20days-brightgreen)](https://docs.npmjs.com/cli/v10/using-npm/config#min-release-age)
-[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/affromero/flight-finder/pulls)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/alexander-vyh/ticket-tracker/pulls)
 [![Ko-fi](https://img.shields.io/badge/Ko--fi-Support-FF5E5B?logo=ko-fi&logoColor=white)](https://ko-fi.com/afromero)
 [![self-hostable: yes](https://img.shields.io/badge/self--hostable-yes-3fa463)](#quick-start)
 [![BYOK: bring your own keys](https://img.shields.io/badge/BYOK-bring%20your%20own%20keys-c2772e)](#quick-start)
 [![agent: Claude Code / Codex](https://img.shields.io/badge/agent-Claude%20Code%20%2F%20Codex-4b5fc7)](#quick-start)
-[![AGENTS.md](https://img.shields.io/badge/AGENTS.md-7c3aed)](https://github.com/affromero/flight-finder/blob/main/AGENTS.md)
+[![AGENTS.md](https://img.shields.io/badge/AGENTS.md-7c3aed)](https://github.com/alexander-vyh/ticket-tracker/blob/main/AGENTS.md)
 [![LLM: 100% local capable](https://img.shields.io/badge/LLM-100%25%20local%20capable-3fa463)](#quick-start)
 
 <br>
@@ -45,6 +45,8 @@ Track flight prices over time. Self-hosted. Open source. Bring your own LLM.
 </div>
 
 ---
+
+This repository is a personal fork of [affromero/flight-finder](https://github.com/affromero/flight-finder), extended with passenger-aware and multi-segment searches, guarded Google Flights data collection, and date-variation tooling.
 
 ## Migrating from Fairtrail?
 
@@ -658,4 +660,4 @@ This software is provided as-is for personal and educational use.
 
 ## License
 
-MIT
+This fork is distributed under the [GNU General Public License v3.0 only](LICENSE). It incorporates upstream MIT-licensed work; the original copyright and permission notice are preserved in [LICENSES/MIT.txt](LICENSES/MIT.txt) and explained in [NOTICE.md](NOTICE.md).

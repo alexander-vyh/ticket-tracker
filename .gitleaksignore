@@ -1,0 +1,2 @@
+# False positive: model benchmark telemetry `finish_reason=stop`, not a credential.
+e22bcae171701b15db82946a3d70226c18a1ff28:apps/web/src/lib/scraper/extraction-recall.live.test.ts:generic-api-key:23

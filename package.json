@@ -22,6 +22,11 @@
     "node": ">=22"
   },
   "version": "0.13.0",
+  "license": "GPL-3.0-only",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/alexander-vyh/ticket-tracker.git"
+  },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.110.0",
     "@google/generative-ai": "^0.24.1",

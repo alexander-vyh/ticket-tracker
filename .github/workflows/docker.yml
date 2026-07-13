@@ -1,12 +1,6 @@
 name: Docker
 
 on:
-  workflow_run:
-    workflows: [CI]
-    types: [completed]
-    branches: [main]
-  release:
-    types: [published]
   workflow_dispatch:
     inputs:
       ref:
@@ -16,11 +10,10 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: affromero/flight-finder
+  IMAGE_NAME: ${{ github.repository }}
 
 jobs:
   build:
-    if: ${{ github.event_name == 'release' || github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     strategy:
       fail-fast: true
       matrix:
@@ -36,7 +29,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.0
         with:
-          ref: ${{ inputs.ref || github.event.workflow_run.head_sha || github.sha }}
+          ref: ${{ inputs.ref || github.sha }}
 
       - uses: docker/setup-buildx-action@v4.2.0
 
@@ -53,7 +46,7 @@ jobs:
           context: .
           platforms: ${{ matrix.platform }}
           build-args: |
-            COMMIT_SHA=${{ inputs.ref || github.event.workflow_run.head_sha || github.sha }}
+            COMMIT_SHA=${{ inputs.ref || github.sha }}
           outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
 
       - name: Export digest
@@ -78,7 +71,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.0
         with:
-          ref: ${{ inputs.ref || github.event.workflow_run.head_sha || github.sha }}
+          ref: ${{ inputs.ref || github.sha }}
 
       - name: Get version
         id: version
@@ -101,14 +94,26 @@ jobs:
       - name: Create multi-arch manifest
         working-directory: /tmp/digests
         env:
-          HEAD_SHA: ${{ inputs.ref || github.event.workflow_run.head_sha || github.sha }}
+          HEAD_SHA: ${{ inputs.ref || github.sha }}
         run: |
+          shopt -s nullglob
+          digest_files=(*)
+          if ((${#digest_files[@]} == 0)); then
+            echo "No image digests were downloaded" >&2
+            exit 1
+          fi
+
+          images=()
+          for digest in "${digest_files[@]}"; do
+            images+=("${REGISTRY}/${IMAGE_NAME}@sha256:${digest}")
+          done
+
           docker buildx imagetools create \
-            -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest \
-            -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }} \
-            -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${HEAD_SHA} \
-            $(printf '${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@sha256:%s ' *)
+            -t "${REGISTRY}/${IMAGE_NAME}:latest" \
+            -t "${REGISTRY}/${IMAGE_NAME}:${{ steps.version.outputs.version }}" \
+            -t "${REGISTRY}/${IMAGE_NAME}:${HEAD_SHA}" \
+            "${images[@]}"
 
       - name: Verify manifest
         run: |
-          docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          docker buildx imagetools inspect "${REGISTRY}/${IMAGE_NAME}:latest"

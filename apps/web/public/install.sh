@@ -63,7 +63,7 @@ echo ""
 printf "  ${DIM}3.${RESET} Generate a local ${BOLD}.env${RESET} config file in ~/.flight-finder/\n"
 echo ""
 printf "  ${DIM}No data leaves your machine. No account required.${RESET}\n"
-printf "  ${DIM}Open source (MIT) — ${BOLD}https://github.com/affromero/flight-finder${RESET}\n"
+printf "  ${DIM}Open source (GPLv3) — ${BOLD}https://github.com/alexander-vyh/ticket-tracker${RESET}\n"
 echo ""
 
 # Allow non-interactive mode (e.g., CI) by setting FLIGHT_FINDER_YES=1

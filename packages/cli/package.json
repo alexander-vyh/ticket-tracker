@@ -2,6 +2,7 @@
   "name": "@flight-finder/cli",
   "version": "0.13.0",
   "private": true,
+  "license": "GPL-3.0-only",
   "type": "module",
   "bin": {
     "flight-finder-tui": "./dist/index.js",
