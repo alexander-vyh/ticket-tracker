@@ -38,6 +38,10 @@ const baseParsed = {
   preferredAirlines: [] as string[],
   timePreference: 'any' as const,
   currency: 'EUR',
+  adults: 1,
+  children: 0,
+  infantsInSeat: 0,
+  infantsOnLap: 0,
 };
 
 const baseRoute = {
@@ -53,6 +57,70 @@ describe('createTrackedQueries', () => {
   beforeEach(() => {
     mockQueryCreate.mockClear();
     mockSnapshotCreateMany.mockClear();
+  });
+
+  it('persists the exact parsed passenger tuple for family trackers', async () => {
+    await createTrackedQueries(
+      {
+        ...baseParsed,
+        adults: 2,
+        children: 1,
+        infantsInSeat: 1,
+        infantsOnLap: 1,
+      },
+      'Two adults, one child, and two infants from BRI to JFK Nov 7',
+      [{ route: { ...baseRoute }, flights: [] }],
+    );
+
+    const createCall = mockQueryCreate.mock.calls[0]![0] as {
+      data: {
+        adults: number;
+        children: number;
+        infantsInSeat: number;
+        infantsOnLap: number;
+      };
+    };
+    expect({
+      adults: createCall.data.adults,
+      children: createCall.data.children,
+      infantsInSeat: createCall.data.infantsInSeat,
+      infantsOnLap: createCall.data.infantsOnLap,
+    }).toEqual({ adults: 2, children: 1, infantsInSeat: 1, infantsOnLap: 1 });
+  });
+
+  it('persists an asymmetric passenger tuple for every selected route', async () => {
+    await createTrackedQueries(
+      {
+        ...baseParsed,
+        adults: 3,
+        children: 2,
+        infantsInSeat: 0,
+        infantsOnLap: 1,
+      },
+      'Three adults, two children, and one lap infant from BRI to New York Nov 7',
+      [
+        { route: { ...baseRoute }, flights: [] },
+        {
+          route: {
+            ...baseRoute,
+            destination: 'EWR',
+            destinationName: 'Newark',
+          },
+          flights: [],
+        },
+      ],
+    );
+
+    expect(mockQueryCreate).toHaveBeenCalledTimes(2);
+    for (const [call] of mockQueryCreate.mock.calls) {
+      const data = (call as { data: Record<string, unknown> }).data;
+      expect({
+        adults: data.adults,
+        children: data.children,
+        infantsInSeat: data.infantsInSeat,
+        infantsOnLap: data.infantsOnLap,
+      }).toEqual({ adults: 3, children: 2, infantsInSeat: 0, infantsOnLap: 1 });
+    }
   });
 
   // Issue 65: a picked Turkish flight used to silently flag the saved query as
