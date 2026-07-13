@@ -37,29 +37,61 @@ export interface ReferenceCell {
 }
 
 /**
- * A route+date pair with inventory deep enough that an empty page for it means
- * the CHANNEL is broken, not that the market is.
+ * A route with inventory deep enough that an empty page for it means the CHANNEL
+ * is broken, not that the market is.
  *
- * Chosen because it is the most heavily corroborated cell we have: watched live
- * on 2026-07-11 rendering 12 itineraries SEATING FIVE at a $3,725 floor, and
- * rendering 8 results at 1, 2 and 3 passengers within minutes of each other.
+ * LAX->AKL is the corroborated choice: across 200+ live loads at <= 3 passengers
+ * spanning every date in a two-month window, it never once returned an empty page.
  *
  * WHAT AN EMPTY CANARY HERE MEANS: not "LAX->AKL sold out" but "Google is not
  * answering queries at this party size right now". That is exactly the
  * proposition we need, and it is why the canary is valid cover for a query on
- * ANY route: the >= 4 party gate is a property of the channel, not of a route.
- *
- * STALENESS IS A REAL RISK and it fails in the safe direction: if this cell ever
- * genuinely sells out, the canary goes red, every empty becomes `unverified`, and
- * the tracker stops claiming sold-outs rather than fabricating them. Loud and
- * safe, not silent and wrong.
+ * ANY route: the party gate is a property of the channel, not of a route.
  */
-export const KNOWN_GOOD_REFERENCE_CELL: ReferenceCell = {
-  origin: 'LAX',
-  destination: 'AKL',
-  departDate: '2026-12-01',
-  returnDate: '2026-12-22',
-};
+const REFERENCE_ROUTE = { origin: 'LAX', destination: 'AKL' } as const;
+
+/**
+ * How far ahead the reference cell sits. Far enough that inventory is deep and
+ * unsold; near enough that Google still prices it normally.
+ */
+const REFERENCE_LEAD_DAYS = 150;
+const REFERENCE_STAY_NIGHTS = 21;
+
+function shiftIso(iso: string, days: number): string {
+  const d = new Date(`${iso}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
+/**
+ * The reference cell ROLLS with the clock.
+ *
+ * A hard-coded cell is a time bomb: once its dates pass, Google prices nothing for
+ * them, the canary is permanently empty, EVERY empty result becomes `unverified`,
+ * and the tracker silently loses the ability to report a sold-out at all. It fails
+ * safe — it will never fabricate a sold-out — but it fails *silently*, which is its
+ * own kind of broken: the guard looks healthy while the capability is gone.
+ *
+ * Deriving it from `now` means it can never expire. `isReferenceCellUsable()` is the
+ * belt to this braces: it catches an *injected* cell that has gone stale.
+ */
+export function defaultReferenceCell(now: Date = new Date()): ReferenceCell {
+  const depart = shiftIso(now.toISOString().slice(0, 10), REFERENCE_LEAD_DAYS);
+  return {
+    ...REFERENCE_ROUTE,
+    departDate: depart,
+    returnDate: shiftIso(depart, REFERENCE_STAY_NIGHTS),
+  };
+}
+
+/**
+ * A cell whose departure has already passed cannot vouch for anything — Google
+ * returns nothing for a date in the past, which is indistinguishable from a
+ * channel block. Such a canary must never be *believed*, in either direction.
+ */
+export function isReferenceCellUsable(cell: ReferenceCell, now: Date = new Date()): boolean {
+  return cell.departDate > now.toISOString().slice(0, 10);
+}
 
 /**
  * The party the monotonicity probe drops to. One adult is the smallest possible
@@ -76,7 +108,11 @@ export interface ProbeDeps {
   /** The target query's route params — used by the monotonicity probe, which
    *  re-runs the target's OWN cell. */
   pairParams: FlightSearchParams;
+  /** Override the rolling default. Injecting a FIXED cell reintroduces the
+   *  expiry bug, so `isReferenceCellUsable()` guards it. */
   referenceCell?: ReferenceCell;
+  /** Injectable clock, so the rolling cell and the staleness check are testable. */
+  now?: Date;
 }
 
 function isoToDate(iso: string): Date {
@@ -116,9 +152,22 @@ async function browserFindsFlights(
  * fabricated zero.
  */
 export function createPartyMatchedCanary(deps: ProbeDeps): (query: TfsQuery) => Promise<PartyProbe> {
-  const cell = deps.referenceCell ?? KNOWN_GOOD_REFERENCE_CELL;
+  const cell = deps.referenceCell ?? defaultReferenceCell(deps.now);
 
   return async (query: TfsQuery): Promise<PartyProbe> => {
+    // A cell in the past prices nothing, which looks exactly like a blocked channel.
+    // Report it as an EMPTY canary so the guard can only reach `unverified` — and say
+    // so loudly, because a silently-dead canary is a guard that has stopped guarding.
+    if (!isReferenceCellUsable(cell, deps.now)) {
+      console.error(
+        `[canary] STALE REFERENCE CELL ${cell.origin}->${cell.destination} ${cell.departDate}: ` +
+          `the departure date has PASSED. Google prices nothing for it, so this canary can never ` +
+          `pass and NO sold-out can ever be confirmed. Fix the injected referenceCell — the built-in ` +
+          `default rolls with the clock and cannot expire.`,
+      );
+      return { passengers: { ...query.passengers }, cellKey: cellKeyOf(query), foundFlights: false };
+    }
+
     const canaryQuery: TfsQuery = {
       trip: 'round-trip',
       seat: query.seat,

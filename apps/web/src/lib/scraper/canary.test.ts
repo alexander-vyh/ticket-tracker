@@ -25,7 +25,8 @@ vi.mock('./navigate', async (importOriginal) => {
 import {
   createMonotonicityProbe,
   createPartyMatchedCanary,
-  KNOWN_GOOD_REFERENCE_CELL,
+  defaultReferenceCell,
+  isReferenceCellUsable,
   type ProbeDeps,
 } from './canary';
 
@@ -77,12 +78,12 @@ describe('createPartyMatchedCanary', () => {
     const probe = await createPartyMatchedCanary(DEPS)(FAMILY);
 
     expect(probe.cellKey).not.toBe(cellKeyOf(FAMILY));
-    expect(probe.cellKey).toContain(KNOWN_GOOD_REFERENCE_CELL.departDate);
+    expect(probe.cellKey).toContain(defaultReferenceCell().departDate);
     // And it must navigate against the REFERENCE route's params, or the page's
     // route/date verification would be checking the wrong itinerary.
     const [, params] = mockNavigateGoogleFlightsUrl.mock.calls[0]!;
-    expect((params as FlightSearchParams).origin).toBe(KNOWN_GOOD_REFERENCE_CELL.origin);
-    expect((params as FlightSearchParams).destination).toBe(KNOWN_GOOD_REFERENCE_CELL.destination);
+    expect((params as FlightSearchParams).origin).toBe(defaultReferenceCell().origin);
+    expect((params as FlightSearchParams).destination).toBe(defaultReferenceCell().destination);
   });
 
   it('goes through the BROWSER tier — the tier it is vouching for', async () => {
@@ -139,5 +140,45 @@ describe('createMonotonicityProbe', () => {
     mockNavigateGoogleFlightsUrl.mockRejectedValue(new Error('browser died'));
     const probe = await createMonotonicityProbe(DEPS)(FAMILY);
     expect(probe.foundFlights).toBe(false);
+  });
+});
+
+describe('the reference cell cannot expire', () => {
+  // ticket-tracker-0gr. The cell used to be hard-coded to Dec 2026. Once those dates
+  // passed, Google would price nothing for them, the canary would be permanently empty,
+  // every empty result would become `unverified`, and the tracker would SILENTLY lose the
+  // ability to report a sold-out at all. Safe, but silently broken — a guard that has
+  // stopped guarding while still looking healthy.
+
+  it('rolls forward with the clock — it is always in the future, at any date', () => {
+    for (const iso of ['2026-07-13', '2027-01-01', '2030-06-30', '2099-12-31']) {
+      const now = new Date(`${iso}T12:00:00Z`);
+      const cell = defaultReferenceCell(now);
+      expect(cell.departDate > iso).toBe(true);
+      expect(cell.returnDate > cell.departDate).toBe(true);
+      expect(isReferenceCellUsable(cell, now)).toBe(true);
+    }
+  });
+
+  it('rejects an INJECTED cell whose departure has already passed', () => {
+    const now = new Date('2027-03-01T12:00:00Z');
+    const stale = { origin: 'LAX', destination: 'AKL', departDate: '2026-12-01', returnDate: '2026-12-22' };
+    expect(isReferenceCellUsable(stale, now)).toBe(false);
+  });
+
+  it('a STALE injected cell reports NO inventory, so no sold-out can ever be confirmed from it', async () => {
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const canary = createPartyMatchedCanary({
+      ...DEPS,
+      referenceCell: { origin: 'LAX', destination: 'AKL', departDate: '2026-12-01', returnDate: '2026-12-22' },
+      now: new Date('2027-03-01T12:00:00Z'),
+    });
+    const probe = await canary(FAMILY);
+
+    // foundFlights=false is the ONLY value that can never license a sold-out claim.
+    expect(probe.foundFlights).toBe(false);
+    // …and it must SAY so. A silently dead canary is the bug.
+    expect(err).toHaveBeenCalledWith(expect.stringContaining('STALE REFERENCE CELL'));
+    err.mockRestore();
   });
 });
