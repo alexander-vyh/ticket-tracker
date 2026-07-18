@@ -90,13 +90,34 @@ test_old_dir_migration() {
 }
 
 # ---------------------------------------------------------------------------
-# Test: .env.example documents HOST_PORT
+# Test: the public configuration template survives a clean checkout
 # ---------------------------------------------------------------------------
-test_env_host_port() {
-  if grep -q 'HOST_PORT' ".env.example"; then
-    pass ".env.example documents HOST_PORT"
+test_env_example_contract() {
+  local template=".env.example"
+
+  if ! git ls-files --error-unmatch -- "$template" >/dev/null 2>&1; then
+    fail ".env.example must be tracked so clean checkouts include it"
+  elif git check-ignore -q --no-index "$template"; then
+    fail ".env.example must be exempt from the .env.* ignore rule"
+  elif git ls-files --error-unmatch -- ".env" >/dev/null 2>&1; then
+    fail ".env must never be tracked"
+  elif ! git check-ignore -q --no-index ".env"; then
+    fail ".env must remain ignored while .env.example is published"
+  elif ! git check-ignore -q --no-index ".env.local" ||
+       ! git check-ignore -q --no-index ".env.production" ||
+       ! git check-ignore -q --no-index ".env.bak.probe"; then
+    fail ".env variants and backups must remain ignored"
+  elif grep -Eq '^[[:space:]]*HOST_PORT=' "$template"; then
+    fail "HOST_PORT must remain commented in .env.example"
+  elif ! grep -q '^# HOST_PORT=3003$' "$template"; then
+    fail ".env.example should document the default HOST_PORT without activating it"
+  elif ! grep -q '^# Copy this file: cp \.env\.example \.env$' "$template"; then
+    fail ".env.example must explain how to create the private configuration"
+  elif ! grep -q '^POSTGRES_PASSWORD=change-me-to-a-random-value$' "$template" ||
+       ! grep -q '^ANTHROPIC_API_KEY=$' "$template"; then
+    fail ".env.example must include safe placeholders for the required configuration"
   else
-    fail ".env.example should document HOST_PORT"
+    pass ".env.example is tracked, publishable, and documents HOST_PORT safely"
   fi
 }
 
@@ -501,7 +522,7 @@ test_update_shows_curl_errors
 test_update_force_recreates_web
 test_path_patches_both_files
 test_old_dir_migration
-test_env_host_port
+test_env_example_contract
 test_entrypoint_port_warning
 test_install_overrides
 test_ansi_variables_defined
